@@ -16,6 +16,8 @@ class ASRResponse(BaseModel):
     process_ms: int = 0
     rtf: float = 0.0
     model: str = ""
+    # 实际使用的引擎是否由请求/默认模型降级而来 (Phase 2 §6.4)
+    degraded: bool = False
 
 
 class TTSRequest(BaseModel):
@@ -23,6 +25,7 @@ class TTSRequest(BaseModel):
     voice: str = "中文女"
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     format: str = Field(default="wav", pattern="^(wav)$")
+    model: Optional[str] = None
 
 
 class ModelInfo(BaseModel):
@@ -30,6 +33,7 @@ class ModelInfo(BaseModel):
     kind: str  # "asr" | "tts"
     expected_sample_rate: int
     languages: list[str] = Field(default_factory=list)
+    default: bool = False
 
 
 class ModelsResponse(BaseModel):

@@ -43,6 +43,35 @@ class Settings(BaseSettings):
     funasr_vad_max_segment_ms: int = 30000
     funasr_use_itn: bool = True
 
+    # ---- 多模型 (Phase 2 §6.1) ----
+    # 第二个 ASR: Paraformer-zh (中文高精度 + 时间戳 + 标点)。留空则不注册。
+    funasr_paraformer_model: str = ""
+    # Paraformer 标点模型 (留空则用其自带的 vad-punc 组合模型)。
+    funasr_punc_model: str = ""
+    # 默认 ASR 模型对外 name; 留空 = 第一个注册的引擎。
+    default_asr_model: str = ""
+
+    # ---- 并发控制 (Phase 2 §6.3, 单卡防 OOM/雪崩) ----
+    # 同时占用 GPU 的 ASR / TTS 请求上限; 单 T4 建议 1-2。
+    asr_concurrency: int = 2
+    tts_concurrency: int = 2
+    # 排队等待许可的最长时间 (秒); 超时返回 429 + Retry-After。
+    gpu_acquire_timeout: float = 10.0
+    gpu_retry_after: int = 2
+
+    # ---- 降级链 + 熔断 (Phase 2 §6.4) ----
+    # 文件式 ASR 主引擎失败时, 自动降级到其余已注册引擎。
+    asr_fallback_enabled: bool = True
+    # 单次 ASR 推理超时 (秒); 0 = 不设超时 (长音频安全)。超时视为故障并降级。
+    asr_infer_timeout: float = 0.0
+    # 连续失败达到阈值即熔断该引擎, cooldown 秒内短路跳过。
+    breaker_fail_threshold: int = 3
+    breaker_cooldown: float = 30.0
+
+    # ---- 优雅退出 (Phase 2 §6.5) ----
+    # 收到 SIGTERM 后, 等待存量请求清空的最长时间 (秒)。
+    drain_timeout: float = 25.0
+
     # ---- CosyVoice2 (TTS) ----
     # CosyVoice 仓库根目录: 用于把 third_party/Matcha-TTS 注入 sys.path
     cosyvoice_repo_dir: Optional[str] = None

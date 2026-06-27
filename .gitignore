@@ -27,5 +27,6 @@ smoke_tts_out.wav
 
 # Deploy (secrets + mounted data; keep .example)
 deploy/.env.deploy
+deploy/sync.env
 deploy/models/
 deploy/voices/

@@ -7,9 +7,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes_asr, routes_health, routes_tts
+from app.api.middleware import DrainMiddleware
 from app.config import get_settings
 from app.engines.registry import EngineRegistry
+from app.orchestration.breaker import CircuitBreaker
 from app.orchestration.dispatcher import Dispatcher
+from app.orchestration.lifecycle import Lifecycle
+from app.orchestration.limiter import GpuLimiter
 from app.utils.logging import get_logger, setup_logging
 
 
@@ -21,7 +25,23 @@ async def lifespan(app: FastAPI):
 
     registry = EngineRegistry(settings)
     app.state.registry = registry
-    app.state.dispatcher = Dispatcher(registry)
+    limiter = GpuLimiter(
+        asr_concurrency=settings.asr_concurrency,
+        tts_concurrency=settings.tts_concurrency,
+        acquire_timeout=settings.gpu_acquire_timeout,
+        retry_after=settings.gpu_retry_after,
+    )
+    breaker = CircuitBreaker(
+        fail_threshold=settings.breaker_fail_threshold,
+        cooldown=settings.breaker_cooldown,
+    )
+    app.state.dispatcher = Dispatcher(
+        registry,
+        limiter,
+        breaker,
+        asr_fallback_enabled=settings.asr_fallback_enabled,
+        asr_infer_timeout=settings.asr_infer_timeout,
+    )
 
     # 后台预热, 不阻塞启动; readyz 在预热完成后转为就绪
     async def _warmup() -> None:
@@ -34,10 +54,20 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_warmup())
     yield
 
+    # 优雅退出 (Phase 2 §6.5): uvicorn 收到 SIGTERM 触发 lifespan shutdown。
+    # 置 draining → /readyz not ready + 中间件拒新请求, 等存量请求清空再退出。
+    lifecycle: Lifecycle = app.state.lifecycle
+    lifecycle.begin_drain()
+    await lifecycle.wait_idle(settings.drain_timeout)
+    logger.info("shutdown complete (in_flight=%d)", lifecycle.in_flight)
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    lifecycle = Lifecycle()
+    app.state.lifecycle = lifecycle
+    app.add_middleware(DrainMiddleware, lifecycle=lifecycle)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

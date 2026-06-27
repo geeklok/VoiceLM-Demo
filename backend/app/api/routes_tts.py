@@ -7,6 +7,7 @@ from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 
 from app.orchestration.dispatcher import Dispatcher
+from app.orchestration.limiter import ConcurrencyLimitError
 from app.postprocess.audio_encode import pcm_to_int16_bytes, pcm_to_wav_bytes
 from app.schemas.models import TTSRequest
 from app.utils.logging import get_logger
@@ -22,7 +23,13 @@ def _dispatcher(request: Request) -> Dispatcher:
 @router.post("/api/v1/tts")
 async def tts_file(request: Request, req: TTSRequest) -> Response:
     try:
-        pcm, sr = await _dispatcher(request).tts_file(req.text, req.voice, req.speed)
+        pcm, sr = await _dispatcher(request).tts_file(req.text, req.voice, req.speed, req.model)
+    except ConcurrencyLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("tts error")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -48,9 +55,10 @@ async def tts_stream(websocket: WebSocket) -> None:
     text = req.get("text", "")
     voice = req.get("voice", "中文女")
     speed = float(req.get("speed", 1.0))
+    model = req.get("model") or None
 
     try:
-        stream, sr = await dispatcher.tts_stream(text, voice, speed)
+        stream, sr = await dispatcher.tts_stream(text, voice, speed, model)
         await websocket.send_json({"type": "meta", "sample_rate": sr, "format": "pcm_s16le"})
         async for pcm_chunk in stream:
             await websocket.send_bytes(pcm_to_int16_bytes(pcm_chunk))
@@ -58,6 +66,14 @@ async def tts_stream(websocket: WebSocket) -> None:
         await websocket.close()
     except WebSocketDisconnect:
         logger.info("tts ws disconnected")
+    except ConcurrencyLimitError as exc:
+        try:
+            await websocket.send_json(
+                {"type": "error", "code": "busy", "retry_after": exc.retry_after, "message": str(exc)}
+            )
+            await websocket.close()
+        except RuntimeError:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.exception("tts ws error")
         try:

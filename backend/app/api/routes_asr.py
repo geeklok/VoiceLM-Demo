@@ -9,6 +9,7 @@ from fastapi.websockets import WebSocketDisconnect
 
 from app.config import get_settings
 from app.orchestration.dispatcher import Dispatcher
+from app.orchestration.limiter import ConcurrencyLimitError
 from app.schemas.models import ASRResponse
 from app.utils.errors import AudioProcessingError
 from app.utils.logging import get_logger
@@ -27,6 +28,7 @@ async def asr_file(
     file: UploadFile = File(...),
     language: str = Form("auto"),
     hotwords: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
 ) -> ASRResponse:
     settings = get_settings()
     data = await file.read()
@@ -37,7 +39,15 @@ async def asr_file(
 
     hw = [w.strip() for w in hotwords.split(",") if w.strip()] if hotwords else None
     try:
-        return await _dispatcher(request).asr_file(data, language=language, hotwords=hw)
+        return await _dispatcher(request).asr_file(
+            data, language=language, hotwords=hw, model=model
+        )
+    except ConcurrencyLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     except AudioProcessingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -49,6 +59,7 @@ async def asr_stream(websocket: WebSocket) -> None:
     sample_rate = 16000
     channels = 1
     language = "auto"
+    model: Optional[str] = None
 
     # 第一帧: start 配置
     try:
@@ -60,6 +71,7 @@ async def asr_stream(websocket: WebSocket) -> None:
         sample_rate = int(start.get("sample_rate", 16000))
         channels = int(start.get("channels", 1))
         language = start.get("language", "auto")
+        model = start.get("model") or None
 
     async def chunk_iter() -> AsyncIterator[tuple[np.ndarray, int, int]]:
         while True:
@@ -75,7 +87,7 @@ async def asr_stream(websocket: WebSocket) -> None:
                     break
 
     try:
-        async for partial in dispatcher.asr_stream(chunk_iter(), language=language):
+        async for partial in dispatcher.asr_stream(chunk_iter(), language=language, model=model):
             await websocket.send_json(
                 {
                     "type": "final" if partial.is_final else "partial",
@@ -86,6 +98,14 @@ async def asr_stream(websocket: WebSocket) -> None:
         await websocket.close()
     except WebSocketDisconnect:
         logger.info("asr ws disconnected")
+    except ConcurrencyLimitError as exc:
+        try:
+            await websocket.send_json(
+                {"type": "error", "code": "busy", "retry_after": exc.retry_after, "message": str(exc)}
+            )
+            await websocket.close()
+        except RuntimeError:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.exception("asr ws error")
         try:

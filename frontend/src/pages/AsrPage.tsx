@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { asrFile, openAsrStream } from "../api/client";
+import { useEffect, useRef, useState } from "react";
+import { asrFile, fetchModels, openAsrStream, ModelInfo } from "../api/client";
 import { MicRecorder, TARGET_SR } from "../audio/recorder";
 
 export default function AsrPage() {
@@ -10,9 +10,21 @@ export default function AsrPage() {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState("");
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [model, setModel] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
+
+  useEffect(() => {
+    fetchModels()
+      .then((res) => {
+        setModels(res.asr);
+        const def = res.asr.find((m) => m.default) ?? res.asr[0];
+        if (def) setModel(def.name);
+      })
+      .catch(() => {});
+  }, []);
 
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -22,10 +34,10 @@ export default function AsrPage() {
     setText("");
     setMeta("");
     try {
-      const res = await asrFile(file, language, hotwords);
+      const res = await asrFile(file, language, hotwords, model || undefined);
       setText(res.text);
       setMeta(
-        `模型 ${res.model} · 音频 ${res.audio_duration_ms}ms · 处理 ${res.process_ms}ms · RTF ${res.rtf}`
+        `模型 ${res.model}${res.degraded ? " (已降级)" : ""} · 音频 ${res.audio_duration_ms}ms · 处理 ${res.process_ms}ms · RTF ${res.rtf}`
       );
     } catch (err) {
       setError(String(err));
@@ -52,7 +64,8 @@ export default function AsrPage() {
         setText(t);
         if (isFinal) setMeta("转写完成");
       },
-      (msg) => setError(msg)
+      (msg) => setError(msg),
+      model || undefined
     );
     wsRef.current = ws;
 
@@ -80,6 +93,19 @@ export default function AsrPage() {
             <option value="en">English</option>
           </select>
         </div>
+        {models.length > 1 && (
+          <div>
+            <label>ASR 模型</label>
+            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={recording}>
+              {models.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                  {m.default ? " (默认)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div>
           <label>热词 (逗号分隔, 可选)</label>
           <input type="text" value={hotwords} onChange={(e) => setHotwords(e.target.value)} />

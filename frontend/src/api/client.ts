@@ -11,6 +11,7 @@ export interface ASRResponse {
   process_ms: number;
   rtf: number;
   model: string;
+  degraded?: boolean;
 }
 
 export interface ModelInfo {
@@ -18,6 +19,7 @@ export interface ModelInfo {
   kind: string;
   expected_sample_rate: number;
   languages: string[];
+  default?: boolean;
 }
 
 export interface ModelsResponse {
@@ -48,12 +50,14 @@ export async function checkReady(): Promise<boolean> {
 export async function asrFile(
   file: Blob,
   language: string,
-  hotwords?: string
+  hotwords?: string,
+  model?: string
 ): Promise<ASRResponse> {
   const fd = new FormData();
   fd.append("file", file, "audio.wav");
   fd.append("language", language);
   if (hotwords) fd.append("hotwords", hotwords);
+  if (model) fd.append("model", model);
   const r = await fetch("/api/v1/asr", { method: "POST", body: fd });
   if (!r.ok) {
     const detail = await r.json().catch(() => ({}));
@@ -80,12 +84,15 @@ export function openAsrStream(
   sampleRate: number,
   language: string,
   onPartial: (text: string, isFinal: boolean) => void,
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  model?: string
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/asr`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () =>
-    ws.send(JSON.stringify({ type: "start", sample_rate: sampleRate, channels: 1, language }));
+    ws.send(
+      JSON.stringify({ type: "start", sample_rate: sampleRate, channels: 1, language, model })
+    );
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "partial") onPartial(msg.text, false);
