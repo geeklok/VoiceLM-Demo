@@ -3,6 +3,13 @@
 #   cp deploy/.env.deploy.example deploy/.env.deploy   # 按需修改
 #   docker compose -f deploy/docker-compose.yml up -d --build
 # 访问: http://<实例公网IP>
+#
+# 水平扩容 (Phase 2 §6.3): backend 无固定 container_name, 可同机多副本:
+#   docker compose -f deploy/docker-compose.yml up -d --scale backend=2
+# 服务名 backend 由 docker DNS 解析为多条 A 记录, nginx upstream (least_conn +
+# 被动健康摘除) 在多副本间分发并在某副本挂掉时自动摘除。注意单 GPU 共享算力,
+# 多副本仅用于演示故障不中断, QPS 不会线性提升; 真扩容需加 GPU 机器并在
+# frontend/nginx.conf 的 upstream 填入各实例 IP。
 services:
   backend:
     build:
