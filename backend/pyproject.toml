@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asr-tts-backend"
+version = "0.1.0"
+description = "语音大模型后端服务 (ASR + TTS) — FunASR / CosyVoice 自托管"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "python-multipart>=0.0.9",
+    "numpy>=1.24",
+    "soxr>=0.3.7",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# 推理引擎依赖，仅在自托管 GPU 环境安装；本地开发用 stub 引擎可不装
+engines = [
+    "funasr>=1.1.0",
+    "modelscope>=1.13",
+    "huggingface_hub",
+    "torch>=2.1",
+    "torchaudio>=2.1",
+]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

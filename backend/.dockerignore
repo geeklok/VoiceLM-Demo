@@ -1,0 +1,12 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+models/
+third_party/
+voices/
+*.wav
+.env
+smoke_tts_out.wav
