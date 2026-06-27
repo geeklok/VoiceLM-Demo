@@ -9,6 +9,11 @@ import numpy as np
 from app.audio.pipeline import preprocess_file, preprocess_pcm
 from app.engines.base import ASRPartial
 from app.engines.registry import EngineRegistry
+from app.observability.metrics import (
+    INFERENCE_FAILURES,
+    observe_asr,
+    observe_tts,
+)
 from app.orchestration.breaker import CircuitBreaker
 from app.orchestration.limiter import ConcurrencyLimitError, GpuLimiter
 from app.schemas.models import ASRResponse, ASRSegment
@@ -78,6 +83,7 @@ class Dispatcher:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self._breaker.record_failure(engine.name)
+                INFERENCE_FAILURES.labels(engine=engine.name).inc()
                 last_exc = exc
                 logger.warning(
                     "asr engine=%s failed (%s); trying fallback", engine.name, exc
@@ -86,6 +92,14 @@ class Dispatcher:
 
             self._breaker.record_success(engine.name)
             rtf = (process_ms / pre.duration_ms) if pre.duration_ms else 0.0
+            observe_asr(
+                engine.name,
+                status="ok",
+                degraded=(engine.name != primary_name),
+                process_ms=process_ms,
+                audio_ms=pre.duration_ms,
+                rtf=rtf,
+            )
             return ASRResponse(
                 text=result.text,
                 segments=[ASRSegment(**s) for s in result.segments],
@@ -97,6 +111,10 @@ class Dispatcher:
             )
 
         # 所有引擎均失败或被熔断
+        observe_asr(
+            primary_name, status="error", degraded=False,
+            process_ms=0, audio_ms=0, rtf=0.0,
+        )
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("ASR 服务暂不可用 (所有引擎已熔断)")
@@ -122,18 +140,57 @@ class Dispatcher:
         self, text: str, voice: str, speed: float, model: Optional[str] = None
     ) -> tuple[np.ndarray, int]:
         engine = self._registry.tts(model)
-        async with self._limiter.tts_slot():
-            pcm = await engine.synthesize(text, voice=voice, speed=speed)
-        return pcm, engine.output_sample_rate
+        sr = engine.output_sample_rate
+        try:
+            async with self._limiter.tts_slot():
+                t0 = time.perf_counter()
+                pcm = await engine.synthesize(text, voice=voice, speed=speed)
+                process_ms = int((time.perf_counter() - t0) * 1000)
+        except ConcurrencyLimitError:
+            raise
+        except Exception:
+            observe_tts(engine.name, "file", status="error")
+            raise
+        audio_ms = int(len(pcm) / sr * 1000) if sr else 0
+        rtf = (process_ms / audio_ms) if audio_ms else None
+        observe_tts(
+            engine.name, "file", status="ok",
+            process_ms=process_ms, rtf=rtf,
+        )
+        return pcm, sr
 
     async def tts_stream(
         self, text: str, voice: str, speed: float, model: Optional[str] = None
     ) -> tuple[AsyncIterator[np.ndarray], int]:
         engine = self._registry.tts(model)
+        sr = engine.output_sample_rate
 
         async def guarded() -> AsyncIterator[np.ndarray]:
-            async with self._limiter.tts_slot():
-                async for chunk in engine.synthesize_stream(text, voice=voice, speed=speed):
-                    yield chunk
+            try:
+                async with self._limiter.tts_slot():
+                    t0 = time.perf_counter()
+                    first = True
+                    n_samples = 0
+                    async for chunk in engine.synthesize_stream(
+                        text, voice=voice, speed=speed
+                    ):
+                        if first:
+                            ttfb_ms = int((time.perf_counter() - t0) * 1000)
+                            first = False
+                        n_samples += len(chunk)
+                        yield chunk
+                    process_ms = int((time.perf_counter() - t0) * 1000)
+                audio_ms = int(n_samples / sr * 1000) if sr else 0
+                observe_tts(
+                    engine.name, "stream", status="ok",
+                    process_ms=process_ms,
+                    ttfb_ms=ttfb_ms if not first else None,
+                    rtf=(process_ms / audio_ms) if audio_ms else None,
+                )
+            except ConcurrencyLimitError:
+                raise
+            except Exception:
+                observe_tts(engine.name, "stream", status="error")
+                raise
 
-        return guarded(), engine.output_sample_rate
+        return guarded(), sr

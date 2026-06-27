@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
+from app.observability.metrics import GPU_INFLIGHT, GPU_QUEUE_REJECTIONS
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -44,11 +45,14 @@ class GpuLimiter:
         try:
             await asyncio.wait_for(sem.acquire(), timeout=self._timeout)
         except asyncio.TimeoutError as exc:
+            GPU_QUEUE_REJECTIONS.labels(kind=kind).inc()
             logger.warning("gpu limiter reject kind=%s (queue timeout)", kind)
             raise ConcurrencyLimitError(retry_after=self._retry_after) from exc
+        GPU_INFLIGHT.labels(kind=kind).inc()
         try:
             yield
         finally:
+            GPU_INFLIGHT.labels(kind=kind).dec()
             sem.release()
 
     def _ensure(self, which: str) -> asyncio.Semaphore:

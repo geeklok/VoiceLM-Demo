@@ -1,0 +1,324 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "title": "ASR / TTS QoS",
+  "uid": "asr-tts-qos",
+  "tags": [
+    "asr",
+    "tts",
+    "qos",
+    "phase3"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "15s",
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "ASR",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "ASR RTF (p50 / p95)",
+      "description": "实时率 = 处理时长/音频时长, 越小越好 (<0.1 优秀)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(asr_rtf_bucket[5m])) by (le, model))",
+          "legendFormat": "p50 {{model}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(asr_rtf_bucket[5m])) by (le, model))",
+          "legendFormat": "p95 {{model}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ASR 推理耗时 p95 (s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(asr_process_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "p95 {{model}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ASR 请求速率 (req/s) by status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(asr_requests_total[5m])) by (status)",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ASR 错误率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(asr_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(asr_requests_total[5m])), 1)",
+          "legendFormat": "error ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "TTS",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS 首包延迟 TTFB (p50 / p95, s)",
+      "description": "CosyVoice2 目标 ~0.15s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(tts_ttfb_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "p50 {{model}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tts_ttfb_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "p95 {{model}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS RTF (p50 / p95)",
+      "description": "合成耗时/音频时长, <1 才能实时",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(tts_rtf_bucket[5m])) by (le, model))",
+          "legendFormat": "p50 {{model}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tts_rtf_bucket[5m])) by (le, model))",
+          "legendFormat": "p95 {{model}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS 请求速率 (req/s) by mode/status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(tts_requests_total[5m])) by (mode, status)",
+          "legendFormat": "{{mode}}/{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "容量 / GPU 闸门",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU 占用并发 (inflight)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(gpu_inflight) by (kind)",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "限流拒绝 (429) / 推理失败 速率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gpu_queue_rejections_total[5m])) by (kind)",
+          "legendFormat": "429 {{kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(inference_failures_total[5m])) by (engine)",
+          "legendFormat": "fail {{engine}}",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

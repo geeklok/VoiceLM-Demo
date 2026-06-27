@@ -1,0 +1,55 @@
+# Phase 3 §7.3 可观测性栈: Prometheus + Grafana。
+# 仅在【入口机】运行 (node1)。Prometheus 抓 backend:8000/metrics + node2 内网。
+#
+# 安全: 9090/3000 只绑 127.0.0.1, 不进公网安全组 (与 backend 8000 同原则)。
+#       本机访问: 直接 localhost; 远程访问: SSH 端口转发
+#         ssh -i key.pem -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 root@<入口机IP>
+#
+# 用法 (在入口机仓库根 deploy/ 下, 主栈已 up 后):
+#   docker compose -f docker-compose.observability.yml up -d
+# 该栈以 external 方式接入主栈网络 deploy_default, 才能用服务名 backend 解析。
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - asrnet
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+    environment:
+      # 默认 admin/admin; 首次登录后改密。匿名只读可选, 这里关闭。
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - asrnet
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  # 接入主栈 (docker-compose.yml) 创建的网络, 才能用服务名 backend 解析。
+  # 主栈默认项目名 deploy -> 网络 deploy_default。
+  asrnet:
+    external: true
+    name: deploy_default
