@@ -90,6 +90,7 @@ button.rec.active { background: #f87171; color: #0f172a; }
   border: 1px solid #334155;
 }
 .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.asr-partial { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
 
 .qos-badge {
   display: flex;

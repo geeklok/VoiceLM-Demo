@@ -16,7 +16,8 @@ interface AsrQos {
 export default function AsrPage() {
   const [language, setLanguage] = useState("auto");
   const [hotwords, setHotwords] = useState("");
-  const [text, setText] = useState("");
+  const [committed, setCommitted] = useState<Record<number, string>>({});
+  const [partial, setPartial] = useState<{ id: number; text: string } | null>(null);
   const [meta, setMeta] = useState("");
   const [qos, setQos] = useState<AsrQos | null>(null);
   const [busy, setBusy] = useState(false);
@@ -27,6 +28,13 @@ export default function AsrPage() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
+
+  const committedText = Object.keys(committed)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map((k) => committed[k])
+    .join("");
+  const hasContent = committedText.length > 0 || (partial?.text?.length ?? 0) > 0;
 
   useEffect(() => {
     fetchModels()
@@ -43,12 +51,13 @@ export default function AsrPage() {
     if (!file) return;
     setBusy(true);
     setError("");
-    setText("");
+    setCommitted({});
+    setPartial(null);
     setMeta("");
     setQos(null);
     try {
       const res = await asrFile(file, language, hotwords, model || undefined);
-      setText(res.text);
+      setCommitted({ 0: res.text });
       setMeta(`音频 ${res.audio_duration_ms}ms`);
       setQos({
         node: res.node,
@@ -71,20 +80,26 @@ export default function AsrPage() {
     if (recording) {
       recRef.current?.stop();
       wsRef.current?.send(JSON.stringify({ type: "end" }));
+      wsRef.current?.close();
       setRecording(false);
       return;
     }
     setError("");
-    setText("");
+    setCommitted({});
+    setPartial(null);
     setMeta("实时转写中...");
     setQos(null);
     const ws = openAsrStream(
       TARGET_SR,
       language,
-      (t, isFinal, node) => {
-        setText(t);
+      (t, isFinal, segmentId, node) => {
+        if (isFinal) {
+          setCommitted((prev) => ({ ...prev, [segmentId]: t }));
+          setPartial((prev) => (prev?.id === segmentId ? null : prev));
+        } else {
+          setPartial({ id: segmentId, text: t });
+        }
         if (node) setQos({ node, mode: "stream" });
-        if (isFinal) setMeta("转写完成");
       },
       (msg) => setError(msg),
       model || undefined
@@ -144,7 +159,18 @@ export default function AsrPage() {
       </div>
 
       {error && <div className="result" style={{ color: "#f87171" }}>{error}</div>}
-      <div className="result">{text || (busy ? "识别中..." : "识别结果将显示在这里")}</div>
+      <div className="result">
+        {hasContent ? (
+          <>
+            <span>{committedText}</span>
+            {partial && <span className="asr-partial">{partial.text}</span>}
+          </>
+        ) : busy ? (
+          "识别中..."
+        ) : (
+          "识别结果将显示在这里"
+        )}
+      </div>
       {meta && <div className="meta">{meta}</div>}
       {qos && (
         <QosBadge

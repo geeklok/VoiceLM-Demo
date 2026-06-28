@@ -44,6 +44,15 @@ class EngineRegistry:
                     punc_model=s.funasr_punc_model,
                 )
                 self._asr[para.name] = para
+            # 真流式 2pass 引擎 (Phase 3, 可选): 配了流式 model id 才注册,
+            # 复用 sensevoice 作 offline 修正引擎 (零额外大模型显存)。
+            if s.funasr_streaming_model:
+                from app.engines.funasr_engine import FunASRStreamingEngine
+
+                streaming = FunASRStreamingEngine(
+                    s, name="funasr-streaming", offline_engine=sense
+                )
+                self._asr[streaming.name] = streaming
         else:
             from app.engines.stub_engine import StubASREngine
 

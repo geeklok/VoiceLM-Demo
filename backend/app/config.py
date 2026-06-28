@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     funasr_vad_max_segment_ms: int = 30000
     funasr_use_itn: bool = True
 
+    # ---- 真流式 ASR (Phase 3: 实时录音转写 2pass) ----
+    # paraformer 流式模型 id/路径; 留空 = 不注册流式引擎 (节点保持伪流式基线)。
+    funasr_streaming_model: str = ""
+    # 聚合窗 (ms): 把前端 ~85ms 小块聚合到该时长再喂模型, 平衡延迟与精度。
+    funasr_streaming_chunk_ms: int = 600
+    # paraformer 流式 chunk_size [回看, 当前, 前看], 600ms 对应 [0,10,5]。
+    funasr_streaming_chunk_size: list[int] = [0, 10, 5]
+    funasr_streaming_encoder_look_back: int = 4
+    funasr_streaming_decoder_look_back: int = 1
+    # 2pass 修正: 句末用 offline SenseVoice 整句重解码覆盖流式临时字。
+    funasr_stream_correct_enabled: bool = True
+
     # ---- 多模型 (Phase 2 §6.1) ----
     # 第二个 ASR: Paraformer-zh (中文高精度 + 时间戳 + 标点)。留空则不注册。
     funasr_paraformer_model: str = ""

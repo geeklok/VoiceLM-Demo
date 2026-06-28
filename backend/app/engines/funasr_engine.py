@@ -133,3 +133,164 @@ class FunASREngine(ASREngine):
         pcm = np.concatenate(buf) if buf else np.zeros(0, dtype=np.float32)
         result = await self.transcribe(pcm, language=language)
         yield ASRPartial(text=result.text, is_final=True)
+
+
+class FunASRStreamingEngine(ASREngine):
+    """真流式 2pass ASR (Phase 3: 实时录音转写)。
+
+    第一遍 (低延迟出字): paraformer-zh-streaming 真流式模型, 按聚合窗逐块增量出字,
+    每个聚合块产出当前句的临时文本 (is_final=False)。
+    第二遍 (字符修正): 流式 fsmn-vad 检测句子端点, 句末把该句原始音频交给已加载的
+    offline SenseVoice 整句重解码, 产出修正后的定稿 (is_final=True) 覆盖临时字。
+
+    复用 offline_engine (已注册的 SenseVoice) 做 2pass, 零额外大模型显存;
+    仅额外加载 paraformer 流式 (~1GB) + 流式 vad 实例 (权重复用)。
+
+    约定: ASRPartial.text 承载「当前这一句」的文本 (非累计全文), segment_id 为句序号。
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        name: str = "funasr-streaming",
+        offline_engine: ASREngine,
+    ) -> None:
+        self._settings = settings
+        self.name = name
+        self._offline = offline_engine
+        self.expected_sample_rate = 16000
+        self.expected_channels = 1
+        self.languages = ["auto", "zh", "en"]
+        self._asr = None
+        self._vad = None
+
+    def _load(self) -> None:
+        if self._asr is not None:
+            return
+        from funasr import AutoModel  # lazy import
+
+        s = self._settings
+        logger.info(
+            "loading FunASR streaming name=%s model=%s vad=%s device=%s",
+            self.name,
+            s.funasr_streaming_model,
+            s.funasr_vad_model,
+            s.device,
+        )
+        self._asr = AutoModel(
+            model=s.funasr_streaming_model, device=s.device, disable_update=True
+        )
+        self._vad = AutoModel(
+            model=s.funasr_vad_model, device=s.device, disable_update=True
+        )
+
+    def is_ready(self) -> bool:
+        return self._asr is not None
+
+    async def warmup(self) -> None:
+        await asyncio.to_thread(self._load)
+        # 用 1s 静音跑一遍流式 generate, 触发权重加载 / kernel 编译。
+        s = self._settings
+        silence = np.zeros(self.expected_sample_rate, dtype=np.float32)
+        await asyncio.to_thread(
+            self._asr.generate,
+            input=silence,
+            cache={},
+            is_final=True,
+            chunk_size=s.funasr_streaming_chunk_size,
+            encoder_chunk_look_back=s.funasr_streaming_encoder_look_back,
+            decoder_chunk_look_back=s.funasr_streaming_decoder_look_back,
+        )
+
+    async def transcribe(
+        self, pcm: np.ndarray, language: str = "auto", hotwords: Optional[list[str]] = None
+    ) -> ASRResult:
+        # 文件式: 委托 offline SenseVoice, 质量与基线一致。
+        return await self._offline.transcribe(pcm, language=language, hotwords=hotwords)
+
+    @staticmethod
+    def _result_text(res) -> str:
+        text = ""
+        for item in res or []:
+            text += item.get("text", "")
+        return text
+
+    @staticmethod
+    def _vad_ended(res) -> bool:
+        # fsmn-vad 流式: res[0]["value"] 为 [[beg, end], ...]; end != -1 表示句子结束。
+        for item in res or []:
+            for seg in item.get("value", []) or []:
+                if isinstance(seg, (list, tuple)) and len(seg) == 2 and seg[1] != -1:
+                    return True
+        return False
+
+    async def transcribe_stream(
+        self, chunks: AsyncIterator[np.ndarray], language: str = "auto"
+    ) -> AsyncIterator[ASRPartial]:
+        self._load()
+        s = self._settings
+        win = int(self.expected_sample_rate * s.funasr_streaming_chunk_ms / 1000)
+        buf: list[np.ndarray] = []
+        seg_audio: list[np.ndarray] = []
+        seg_text = ""
+        seg_id = 0
+        para_cache: dict = {}
+        vad_cache: dict = {}
+
+        def _flush(pcm_block: np.ndarray, is_final: bool) -> tuple[str, bool]:
+            nonlocal seg_text
+            block = np.ascontiguousarray(pcm_block, dtype=np.float32)
+            piece = self._asr.generate(
+                input=block,
+                cache=para_cache,
+                is_final=is_final,
+                chunk_size=s.funasr_streaming_chunk_size,
+                encoder_chunk_look_back=s.funasr_streaming_encoder_look_back,
+                decoder_chunk_look_back=s.funasr_streaming_decoder_look_back,
+            )
+            seg_text += self._result_text(piece)
+            vad_res = self._vad.generate(
+                input=block,
+                cache=vad_cache,
+                is_final=is_final,
+                chunk_size=s.funasr_streaming_chunk_ms,
+            )
+            return seg_text, self._vad_ended(vad_res)
+
+        async def _correct(audio: list[np.ndarray], fallback: str) -> str:
+            if not (s.funasr_stream_correct_enabled and audio):
+                return fallback
+            try:
+                pcm = np.concatenate(audio)
+                fixed = (await self._offline.transcribe(pcm, language=language)).text
+                return fixed or fallback
+            except Exception:  # noqa: BLE001
+                logger.warning("stream 2pass correction failed; keep streaming text")
+                return fallback
+
+        async for chunk in chunks:
+            buf.append(chunk)
+            seg_audio.append(chunk)
+            if sum(len(c) for c in buf) < win:
+                continue
+            block = np.concatenate(buf)
+            buf = []
+            text, ended = await asyncio.to_thread(_flush, block, False)
+            yield ASRPartial(text=text, is_final=False, segment_id=seg_id)
+            if ended:
+                final_text = await _correct(seg_audio, text)
+                yield ASRPartial(text=final_text, is_final=True, segment_id=seg_id)
+                seg_id += 1
+                seg_text = ""
+                seg_audio = []
+                para_cache = {}
+                vad_cache = {}
+
+        # 收尾: flush 残余尾块 + 末句修正。
+        if buf or seg_audio:
+            tail = np.concatenate(buf) if buf else np.zeros(0, dtype=np.float32)
+            text, _ = await asyncio.to_thread(_flush, tail, True)
+            final_text = await _correct(seg_audio, text)
+            if final_text:
+                yield ASRPartial(text=final_text, is_final=True, segment_id=seg_id)

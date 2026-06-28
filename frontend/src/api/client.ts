@@ -110,7 +110,7 @@ export async function ttsFile(
 export function openAsrStream(
   sampleRate: number,
   language: string,
-  onPartial: (text: string, isFinal: boolean, node?: string) => void,
+  onPartial: (text: string, isFinal: boolean, segmentId: number, node?: string) => void,
   onError: (msg: string) => void,
   model?: string
 ): WebSocket {
@@ -122,8 +122,8 @@ export function openAsrStream(
     );
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === "partial") onPartial(msg.text, false, msg.node);
-    else if (msg.type === "final") onPartial(msg.text, true, msg.node);
+    if (msg.type === "partial") onPartial(msg.text, false, msg.segment_id ?? 0, msg.node);
+    else if (msg.type === "final") onPartial(msg.text, true, msg.segment_id ?? 0, msg.node);
     else if (msg.type === "error") onError(msg.message);
   };
   ws.onerror = () => onError("WebSocket 错误");
