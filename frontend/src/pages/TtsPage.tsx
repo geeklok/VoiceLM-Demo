@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchModels, openTtsStream, ttsFile } from "../api/client";
+import { fetchModels, openTtsStream, ttsFile, TtsQos } from "../api/client";
 import { StreamingPcmPlayer } from "../audio/player";
+import { QosBadge } from "../components/QosBadge";
 
 export default function TtsPage() {
   const [text, setText] = useState("你好，欢迎使用语音大模型合成服务。");
@@ -11,6 +12,7 @@ export default function TtsPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [qos, setQos] = useState<TtsQos | null>(null);
   const playerRef = useRef<StreamingPcmPlayer | null>(null);
 
   useEffect(() => {
@@ -29,9 +31,11 @@ export default function TtsPage() {
     setError("");
     setStatus("合成中...");
     setAudioUrl("");
+    setQos(null);
     try {
-      const blob = await ttsFile(text, voice, speed);
+      const { blob, qos } = await ttsFile(text, voice, speed);
       setAudioUrl(URL.createObjectURL(blob));
+      setQos({ ...qos, mode: "file" });
       setStatus("合成完成");
     } catch (err) {
       setError(String(err));
@@ -46,24 +50,31 @@ export default function TtsPage() {
     setError("");
     setStatus("流式合成中 (边合成边播)...");
     setAudioUrl("");
+    setQos(null);
     const player = new StreamingPcmPlayer();
     playerRef.current = player;
     const t0 = performance.now();
     let firstChunk = true;
+    let node: string | undefined;
     openTtsStream(
       text,
       voice,
       speed,
-      (sr) => player.setSampleRate(sr),
+      (sr, n) => {
+        player.setSampleRate(sr);
+        node = n;
+      },
       (pcm) => {
         if (firstChunk) {
-          setStatus(`首包延迟 ${Math.round(performance.now() - t0)}ms`);
+          setStatus(`首包延迟 ${Math.round(performance.now() - t0)}ms (客户端侧)`);
           firstChunk = false;
         }
         player.push(pcm);
       },
-      () => {
+      (serverQos) => {
         setAudioUrl(URL.createObjectURL(player.toWavBlob()));
+        if (serverQos) setQos({ ...serverQos, mode: "stream" });
+        else if (node) setQos({ node, mode: "stream" });
         setBusy(false);
       },
       (msg) => {
@@ -112,6 +123,17 @@ export default function TtsPage() {
 
       {error && <div className="result" style={{ color: "#f87171" }}>{error}</div>}
       {status && <div className="meta">{status}</div>}
+      {qos && (
+        <QosBadge
+          node={qos.node}
+          model={qos.model}
+          mode={qos.mode}
+          ttfbMs={qos.ttfb_ms}
+          processMs={qos.process_ms}
+          audioMs={qos.audio_ms}
+          rtf={qos.rtf}
+        />
+      )}
       {audioUrl && (
         <>
           <audio controls src={audioUrl} autoPlay />

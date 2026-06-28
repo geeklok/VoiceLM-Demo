@@ -149,3 +149,75 @@ def test_infer_timeout_triggers_fallback():
     resp = asyncio.run(disp.asr_file(_wav_bytes()))
     assert resp.model == "fast"
     assert resp.degraded is True
+
+
+class _FakeTTS:
+    """记录每次 synthesize_stream 收到的文本, 用于验证分句拆分。"""
+
+    name = "fake-tts"
+    output_sample_rate = 24000
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def synthesize_stream(self, text, voice="中文女", speed=1.0):  # type: ignore[override]
+        self.calls.append(text)
+        # 每句产出与文本长度相关的短 PCM, 便于校验总量
+        yield np.zeros(max(1, len(text)), dtype=np.float32)
+
+
+class _TTSRegistry:
+    def __init__(self, engine: _FakeTTS) -> None:
+        self._engine = engine
+
+    def tts(self, name=None):
+        return self._engine
+
+
+async def _drain_stream(disp, text):
+    stream, sr, meta, qos = await disp.tts_stream(text, "中文女", 1.0, None)
+    total = 0
+    async for chunk in stream:
+        total += len(chunk)
+    return total, qos
+
+
+def test_tts_stream_splits_when_enabled():
+    eng = _FakeTTS()
+    disp = Dispatcher(
+        _TTSRegistry(eng), GpuLimiter(), CircuitBreaker(),
+        tts_sentence_stream=True, tts_max_sentence_chars=60,
+    )
+    text = "你好。今天天气不错！"
+    total, qos = asyncio.run(_drain_stream(disp, text))
+    assert eng.calls == ["你好。", "今天天气不错！"]
+    assert total == sum(len(s) for s in eng.calls)
+    assert "ttfb_ms" in qos and "process_ms" in qos
+
+
+def test_tts_stream_single_call_when_disabled():
+    eng = _FakeTTS()
+    disp = Dispatcher(
+        _TTSRegistry(eng), GpuLimiter(), CircuitBreaker(),
+        tts_sentence_stream=False,
+    )
+    text = "你好。今天天气不错！"
+    total, qos = asyncio.run(_drain_stream(disp, text))
+    assert eng.calls == [text]
+    assert total == len(text)
+    assert qos.get("model") == "fake-tts"
+
+
+def test_tts_stream_merges_short_segments_when_min_chars_set():
+    eng = _FakeTTS()
+    disp = Dispatcher(
+        _TTSRegistry(eng), GpuLimiter(), CircuitBreaker(),
+        tts_sentence_stream=True, tts_max_sentence_chars=60,
+        tts_min_sentence_chars=20,
+    )
+    text = "你好。今天天气很好。我们一起去公园散步吧。路上可以聊聊最近的新闻。然后再找家餐厅吃饭。"
+    total, qos = asyncio.run(_drain_stream(disp, text))
+    # 合并后段数应少于逐句拆分, 且拼接还原原文
+    assert 1 < len(eng.calls) < 5
+    assert "".join(eng.calls) == text
+    assert total == sum(len(s) for s in eng.calls)

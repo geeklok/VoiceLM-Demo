@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     app_name: str = "asr-tts-backend"
     cors_origins: list[str] = ["*"]
 
+    # 节点标识 (Phase 3): 每台机器经 env 注入 (node1 / node2), 随请求回显给前端,
+    # 用于灰度对比 —— B 线推理优化只在入口机, 扩展机保持旧版, 前端/看板按 node 区分。
+    node_name: str = "local"
+
     # 引擎选择: stub(本地无GPU) | funasr | cosyvoice
     asr_engine: Literal["stub", "funasr"] = "stub"
     tts_engine: Literal["stub", "cosyvoice"] = "stub"
@@ -85,6 +89,16 @@ class Settings(BaseSettings):
     cosyvoice_voices: dict[str, VoiceRef] = {}
     # 默认音色名 (须存在于 cosyvoice_voices)
     cosyvoice_default_voice: str = "default"
+
+    # ---- 分句流式 TTS (Phase 3 §7 B 线 TTFB 优化) ----
+    # 开启后: 长文本按标点分句, 在同一 TTS 信号量内逐句流式合成,
+    # 让第一短句快速出首块以降 TTFB。默认关 = 行为与基线一致。
+    tts_sentence_stream: bool = False
+    # 单句最大字符数: 超出则按次标点/硬截断进一步切短。
+    tts_max_sentence_chars: int = 60
+    # 单段最小字符数: >0 时贪心合并过短段, 让每段音频足够长以盖住
+    # 下一段 LLM prefill, 消除句间播放间隙 (用一点 TTFB 换平滑)。0=不合并。
+    tts_min_sentence_chars: int = 0
 
 
 @lru_cache

@@ -14,7 +14,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "time": {
     "from": "now-1h",
     "to": "now"
@@ -26,12 +26,144 @@
   "panels": [
     {
       "type": "row",
-      "title": "ASR",
+      "title": "灰度对比 (node1 优化版 vs node2 基线版)",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS 首包延迟 TTFB p95 — by node",
+      "description": "B 线只在 node1 灰度: node1 应降到 ~0.15s, node2 维持旧版基线。两线差距即优化收益。",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tts_ttfb_seconds_bucket[5m])) by (le, node))",
+          "legendFormat": "p95 {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(tts_ttfb_seconds_bucket[5m])) by (le, node))",
+          "legendFormat": "p50 {{node}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS RTF p95 — by node",
+      "description": "合成耗时/音频时长; node1 vs node2 对比优化后吞吐效率。",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tts_rtf_bucket[5m])) by (le, node))",
+          "legendFormat": "p95 {{node}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "ASR RTF p95 — by node",
+      "description": "两机相同版本时应基本重合; 作为机器健康基线参照。",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(asr_rtf_bucket[5m])) by (le, node))",
+          "legendFormat": "p95 {{node}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "请求速率 (req/s) — by node",
+      "description": "LB 分流情况: 两机各自承接的 ASR+TTS 请求速率。",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(asr_requests_total[5m])) by (node)",
+          "legendFormat": "asr {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(tts_requests_total[5m])) by (node)",
+          "legendFormat": "tts {{node}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "ASR",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
       }
     },
     {
@@ -46,7 +178,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 1
+        "y": 18
       },
       "fieldConfig": {
         "defaults": {
@@ -78,7 +210,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 1
+        "y": 18
       },
       "fieldConfig": {
         "defaults": {
@@ -105,7 +237,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 26
       },
       "fieldConfig": {
         "defaults": {
@@ -132,7 +264,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 26
       },
       "fieldConfig": {
         "defaults": {
@@ -155,7 +287,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 34
       }
     },
     {
@@ -170,7 +302,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 35
       },
       "fieldConfig": {
         "defaults": {
@@ -203,7 +335,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 35
       },
       "fieldConfig": {
         "defaults": {
@@ -235,7 +367,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 43
       },
       "fieldConfig": {
         "defaults": {
@@ -258,7 +390,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 51
       }
     },
     {
@@ -272,7 +404,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {
@@ -282,8 +414,8 @@
       },
       "targets": [
         {
-          "expr": "sum(gpu_inflight) by (kind)",
-          "legendFormat": "{{kind}}",
+          "expr": "sum(gpu_inflight) by (kind, node)",
+          "legendFormat": "{{kind}} {{node}}",
           "refId": "A"
         }
       ]
@@ -299,7 +431,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 52
       },
       "fieldConfig": {
         "defaults": {

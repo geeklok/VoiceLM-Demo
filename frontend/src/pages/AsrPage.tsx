@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { asrFile, fetchModels, openAsrStream, ModelInfo } from "../api/client";
 import { MicRecorder, TARGET_SR } from "../audio/recorder";
+import { QosBadge } from "../components/QosBadge";
+
+interface AsrQos {
+  node?: string;
+  model?: string;
+  processMs?: number | null;
+  audioMs?: number | null;
+  rtf?: number | null;
+  degraded?: boolean;
+  mode?: string;
+}
 
 export default function AsrPage() {
   const [language, setLanguage] = useState("auto");
   const [hotwords, setHotwords] = useState("");
   const [text, setText] = useState("");
   const [meta, setMeta] = useState("");
+  const [qos, setQos] = useState<AsrQos | null>(null);
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState("");
@@ -33,12 +45,20 @@ export default function AsrPage() {
     setError("");
     setText("");
     setMeta("");
+    setQos(null);
     try {
       const res = await asrFile(file, language, hotwords, model || undefined);
       setText(res.text);
-      setMeta(
-        `模型 ${res.model}${res.degraded ? " (已降级)" : ""} · 音频 ${res.audio_duration_ms}ms · 处理 ${res.process_ms}ms · RTF ${res.rtf}`
-      );
+      setMeta(`音频 ${res.audio_duration_ms}ms`);
+      setQos({
+        node: res.node,
+        model: res.model,
+        processMs: res.process_ms,
+        audioMs: res.audio_duration_ms,
+        rtf: res.rtf,
+        degraded: res.degraded,
+        mode: "file",
+      });
     } catch (err) {
       setError(String(err));
     } finally {
@@ -57,11 +77,13 @@ export default function AsrPage() {
     setError("");
     setText("");
     setMeta("实时转写中...");
+    setQos(null);
     const ws = openAsrStream(
       TARGET_SR,
       language,
-      (t, isFinal) => {
+      (t, isFinal, node) => {
         setText(t);
+        if (node) setQos({ node, mode: "stream" });
         if (isFinal) setMeta("转写完成");
       },
       (msg) => setError(msg),
@@ -124,6 +146,17 @@ export default function AsrPage() {
       {error && <div className="result" style={{ color: "#f87171" }}>{error}</div>}
       <div className="result">{text || (busy ? "识别中..." : "识别结果将显示在这里")}</div>
       {meta && <div className="meta">{meta}</div>}
+      {qos && (
+        <QosBadge
+          node={qos.node}
+          model={qos.model}
+          mode={qos.mode}
+          processMs={qos.processMs}
+          audioMs={qos.audioMs}
+          rtf={qos.rtf}
+          degraded={qos.degraded}
+        />
+      )}
     </div>
   );
 }

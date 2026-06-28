@@ -118,6 +118,7 @@ rsync -az --delete -e "${SSH}" \
   --exclude='deploy/certs/' \
   --exclude='deploy/.env.deploy' \
   --exclude='deploy/sync.env' \
+  --exclude='deploy/docker-compose.override.yml' \
   --exclude='**/test_audio.wav' \
   --exclude='**/*.pt' \
   --exclude='**/*.onnx' \

@@ -18,6 +18,8 @@ class ASRResponse(BaseModel):
     model: str = ""
     # 实际使用的引擎是否由请求/默认模型降级而来 (Phase 2 §6.4)
     degraded: bool = False
+    # 处理该请求的节点 (Phase 3 灰度对比); 由后端 NODE_NAME 注入
+    node: str = ""
 
 
 class TTSRequest(BaseModel):

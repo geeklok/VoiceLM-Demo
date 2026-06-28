@@ -12,6 +12,22 @@ export interface ASRResponse {
   rtf: number;
   model: string;
   degraded?: boolean;
+  node?: string;
+}
+
+export interface TtsQos {
+  node?: string;
+  model?: string;
+  mode?: string;
+  ttfb_ms?: number | null;
+  process_ms?: number | null;
+  audio_ms?: number | null;
+  rtf?: number | null;
+}
+
+export interface TtsFileResult {
+  blob: Blob;
+  qos: TtsQos;
 }
 
 export interface ModelInfo {
@@ -70,20 +86,31 @@ export async function ttsFile(
   text: string,
   voice: string,
   speed: number
-): Promise<Blob> {
+): Promise<TtsFileResult> {
   const r = await fetch("/api/v1/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, voice, speed, format: "wav" }),
   });
   if (!r.ok) throw new Error(`tts ${r.status}`);
-  return r.blob();
+  const num = (h: string): number | null => {
+    const v = r.headers.get(h);
+    return v === null || v === "" ? null : Number(v);
+  };
+  const qos: TtsQos = {
+    node: r.headers.get("X-Node") || undefined,
+    model: r.headers.get("X-Model") || undefined,
+    process_ms: num("X-Process-Ms"),
+    audio_ms: num("X-Audio-Ms"),
+    rtf: num("X-RTF"),
+  };
+  return { blob: await r.blob(), qos };
 }
 
 export function openAsrStream(
   sampleRate: number,
   language: string,
-  onPartial: (text: string, isFinal: boolean) => void,
+  onPartial: (text: string, isFinal: boolean, node?: string) => void,
   onError: (msg: string) => void,
   model?: string
 ): WebSocket {
@@ -95,8 +122,8 @@ export function openAsrStream(
     );
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === "partial") onPartial(msg.text, false);
-    else if (msg.type === "final") onPartial(msg.text, true);
+    if (msg.type === "partial") onPartial(msg.text, false, msg.node);
+    else if (msg.type === "final") onPartial(msg.text, true, msg.node);
     else if (msg.type === "error") onError(msg.message);
   };
   ws.onerror = () => onError("WebSocket 错误");
@@ -107,9 +134,9 @@ export function openTtsStream(
   text: string,
   voice: string,
   speed: number,
-  onMeta: (sampleRate: number) => void,
+  onMeta: (sampleRate: number, node?: string, model?: string) => void,
   onChunk: (pcm: Int16Array) => void,
-  onDone: () => void,
+  onDone: (qos?: TtsQos) => void,
   onError: (msg: string) => void
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/tts`);
@@ -118,8 +145,8 @@ export function openTtsStream(
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "meta") onMeta(msg.sample_rate);
-      else if (msg.type === "done") onDone();
+      if (msg.type === "meta") onMeta(msg.sample_rate, msg.node, msg.model);
+      else if (msg.type === "done") onDone(msg.qos);
       else if (msg.type === "error") onError(msg.message);
     } else {
       onChunk(new Int16Array(ev.data as ArrayBuffer));

@@ -23,7 +23,9 @@ def _dispatcher(request: Request) -> Dispatcher:
 @router.post("/api/v1/tts")
 async def tts_file(request: Request, req: TTSRequest) -> Response:
     try:
-        pcm, sr = await _dispatcher(request).tts_file(req.text, req.voice, req.speed, req.model)
+        pcm, sr, qos = await _dispatcher(request).tts_file(
+            req.text, req.voice, req.speed, req.model
+        )
     except ConcurrencyLimitError as exc:
         raise HTTPException(
             status_code=429,
@@ -34,7 +36,16 @@ async def tts_file(request: Request, req: TTSRequest) -> Response:
         logger.exception("tts error")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     wav = pcm_to_wav_bytes(pcm, sr)
-    return Response(content=wav, media_type="audio/wav")
+    # QoS 经响应头回传 (body 是音频二进制); 前端读 header 展示节点与本次时延。
+    headers = {
+        "X-Node": str(qos.get("node", "")),
+        "X-Model": str(qos.get("model", "")),
+        "X-Process-Ms": str(qos.get("process_ms", "")),
+        "X-Audio-Ms": str(qos.get("audio_ms", "")),
+        "X-RTF": "" if qos.get("rtf") is None else str(qos.get("rtf")),
+        "Access-Control-Expose-Headers": "X-Node,X-Model,X-Process-Ms,X-Audio-Ms,X-RTF",
+    }
+    return Response(content=wav, media_type="audio/wav", headers=headers)
 
 
 @router.websocket("/ws/tts")
@@ -58,11 +69,20 @@ async def tts_stream(websocket: WebSocket) -> None:
     model = req.get("model") or None
 
     try:
-        stream, sr = await dispatcher.tts_stream(text, voice, speed, model)
-        await websocket.send_json({"type": "meta", "sample_rate": sr, "format": "pcm_s16le"})
+        stream, sr, meta, qos_holder = await dispatcher.tts_stream(text, voice, speed, model)
+        await websocket.send_json(
+            {
+                "type": "meta",
+                "sample_rate": sr,
+                "format": "pcm_s16le",
+                "node": meta.get("node", ""),
+                "model": meta.get("model", ""),
+            }
+        )
         async for pcm_chunk in stream:
             await websocket.send_bytes(pcm_to_int16_bytes(pcm_chunk))
-        await websocket.send_json({"type": "done"})
+        # 流耗尽后 qos_holder 已被生成器填好; 随 done 帧把本次 QoS 下发给前端。
+        await websocket.send_json({"type": "done", "qos": qos_holder})
         await websocket.close()
     except WebSocketDisconnect:
         logger.info("tts ws disconnected")

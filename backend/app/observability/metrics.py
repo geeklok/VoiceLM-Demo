@@ -46,7 +46,9 @@ TTS_TTFB_SECONDS = Histogram(
     "tts_ttfb_seconds",
     "TTS 首包延迟 (流式首个音频块返回耗时, 秒), CosyVoice2 目标 ~0.15s",
     ["model"],
-    buckets=(0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0),
+    # 低区细分对齐 ~0.15s 目标 (衡量 B 线优化效果); 高区放宽到 10s,
+    # 因优化前 baseline 首包随文本长度可达数秒, 5s 封顶会让分位数饱和失真。
+    buckets=(0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0),
     registry=REGISTRY,
 )
 TTS_RTF = Histogram(

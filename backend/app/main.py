@@ -41,6 +41,10 @@ async def lifespan(app: FastAPI):
         breaker,
         asr_fallback_enabled=settings.asr_fallback_enabled,
         asr_infer_timeout=settings.asr_infer_timeout,
+        node_name=settings.node_name,
+        tts_sentence_stream=settings.tts_sentence_stream,
+        tts_max_sentence_chars=settings.tts_max_sentence_chars,
+        tts_min_sentence_chars=settings.tts_min_sentence_chars,
     )
 
     # 后台预热, 不阻塞启动; readyz 在预热完成后转为就绪

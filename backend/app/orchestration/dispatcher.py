@@ -18,6 +18,7 @@ from app.orchestration.breaker import CircuitBreaker
 from app.orchestration.limiter import ConcurrencyLimitError, GpuLimiter
 from app.schemas.models import ASRResponse, ASRSegment
 from app.utils.logging import get_logger
+from app.utils.text_split import split_sentences
 
 logger = get_logger(__name__)
 
@@ -40,12 +41,24 @@ class Dispatcher:
         *,
         asr_fallback_enabled: bool = True,
         asr_infer_timeout: float = 0.0,
+        node_name: str = "local",
+        tts_sentence_stream: bool = False,
+        tts_max_sentence_chars: int = 60,
+        tts_min_sentence_chars: int = 0,
     ) -> None:
         self._registry = registry
         self._limiter = limiter or GpuLimiter()
         self._breaker = breaker or CircuitBreaker()
         self._fallback_enabled = asr_fallback_enabled
         self._infer_timeout = asr_infer_timeout
+        self._node = node_name
+        self._tts_sentence_stream = tts_sentence_stream
+        self._tts_max_sentence_chars = tts_max_sentence_chars
+        self._tts_min_sentence_chars = tts_min_sentence_chars
+
+    @property
+    def node(self) -> str:
+        return self._node
 
     async def asr_file(
         self,
@@ -108,6 +121,7 @@ class Dispatcher:
                 rtf=round(rtf, 4),
                 model=engine.name,
                 degraded=(engine.name != primary_name),
+                node=self._node,
             )
 
         # 所有引擎均失败或被熔断
@@ -138,7 +152,7 @@ class Dispatcher:
 
     async def tts_file(
         self, text: str, voice: str, speed: float, model: Optional[str] = None
-    ) -> tuple[np.ndarray, int]:
+    ) -> tuple[np.ndarray, int, dict]:
         engine = self._registry.tts(model)
         sr = engine.output_sample_rate
         try:
@@ -157,35 +171,69 @@ class Dispatcher:
             engine.name, "file", status="ok",
             process_ms=process_ms, rtf=rtf,
         )
-        return pcm, sr
+        qos = {
+            "node": self._node,
+            "model": engine.name,
+            "process_ms": process_ms,
+            "audio_ms": audio_ms,
+            "rtf": round(rtf, 4) if rtf is not None else None,
+        }
+        return pcm, sr, qos
 
     async def tts_stream(
         self, text: str, voice: str, speed: float, model: Optional[str] = None
-    ) -> tuple[AsyncIterator[np.ndarray], int]:
+    ) -> tuple[AsyncIterator[np.ndarray], int, dict, dict]:
+        """返回 (音频块流, 采样率, meta, qos_holder)。
+
+        meta 含 node/model, 供 WS 首帧立刻回显「落到哪台机器」。
+        qos_holder 是可变 dict, 流结束后由生成器填入 ttfb_ms/process_ms/rtf/audio_ms,
+        路由在流耗尽后读取它并随 done 帧下发, 前端即可展示本次请求的 QoS。
+        """
         engine = self._registry.tts(model)
         sr = engine.output_sample_rate
+        meta = {"node": self._node, "model": engine.name}
+        qos_holder: dict = {}
 
         async def guarded() -> AsyncIterator[np.ndarray]:
             try:
+                if self._tts_sentence_stream:
+                    sentences = split_sentences(
+                        text,
+                        self._tts_max_sentence_chars,
+                        self._tts_min_sentence_chars,
+                    ) or [text]
+                else:
+                    sentences = [text]
                 async with self._limiter.tts_slot():
                     t0 = time.perf_counter()
                     first = True
+                    ttfb_ms = None
                     n_samples = 0
-                    async for chunk in engine.synthesize_stream(
-                        text, voice=voice, speed=speed
-                    ):
-                        if first:
-                            ttfb_ms = int((time.perf_counter() - t0) * 1000)
-                            first = False
-                        n_samples += len(chunk)
-                        yield chunk
+                    for sentence in sentences:
+                        async for chunk in engine.synthesize_stream(
+                            sentence, voice=voice, speed=speed
+                        ):
+                            if first:
+                                ttfb_ms = int((time.perf_counter() - t0) * 1000)
+                                first = False
+                            n_samples += len(chunk)
+                            yield chunk
                     process_ms = int((time.perf_counter() - t0) * 1000)
                 audio_ms = int(n_samples / sr * 1000) if sr else 0
+                rtf = (process_ms / audio_ms) if audio_ms else None
                 observe_tts(
                     engine.name, "stream", status="ok",
                     process_ms=process_ms,
-                    ttfb_ms=ttfb_ms if not first else None,
-                    rtf=(process_ms / audio_ms) if audio_ms else None,
+                    ttfb_ms=ttfb_ms,
+                    rtf=rtf,
+                )
+                qos_holder.update(
+                    node=self._node,
+                    model=engine.name,
+                    ttfb_ms=ttfb_ms,
+                    process_ms=process_ms,
+                    audio_ms=audio_ms,
+                    rtf=round(rtf, 4) if rtf is not None else None,
                 )
             except ConcurrencyLimitError:
                 raise
@@ -193,4 +241,4 @@ class Dispatcher:
                 observe_tts(engine.name, "stream", status="error")
                 raise
 
-        return guarded(), sr
+        return guarded(), sr, meta, qos_holder

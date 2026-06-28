@@ -93,6 +93,7 @@ async def asr_stream(websocket: WebSocket) -> None:
                     "type": "final" if partial.is_final else "partial",
                     "text": partial.text,
                     "segment_id": partial.segment_id,
+                    "node": dispatcher.node,
                 }
             )
         await websocket.close()
