@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import routes_asr, routes_health, routes_tts
+from app.api import routes_asr, routes_chat, routes_health, routes_tts
 from app.api.middleware import DrainMiddleware
 from app.config import get_settings
+from app.engines.agent_client import AgentClient
 from app.engines.registry import EngineRegistry
 from app.orchestration.breaker import CircuitBreaker
 from app.orchestration.dispatcher import Dispatcher
@@ -47,6 +48,14 @@ async def lifespan(app: FastAPI):
         tts_min_sentence_chars=settings.tts_min_sentence_chars,
     )
 
+    # 语音聊天 (Phase 3): 仅当开启且配了 endpoint 才建 AgentClient 单例 (复用连接池);
+    # 否则置 None, /ws/chat 直接回 unavailable, 不影响 ASR/TTS。v1 仅 node1 启用。
+    if settings.chat_enabled and settings.agent_endpoint:
+        app.state.agent_client = AgentClient(settings)
+        logger.info("chat enabled: agent=%s model=%s", settings.agent_endpoint, settings.agent_model)
+    else:
+        app.state.agent_client = None
+
     # 后台预热, 不阻塞启动; readyz 在预热完成后转为就绪
     async def _warmup() -> None:
         try:
@@ -63,6 +72,9 @@ async def lifespan(app: FastAPI):
     lifecycle: Lifecycle = app.state.lifecycle
     lifecycle.begin_drain()
     await lifecycle.wait_idle(settings.drain_timeout)
+    agent_client = getattr(app.state, "agent_client", None)
+    if agent_client is not None:
+        await agent_client.aclose()
     logger.info("shutdown complete (in_flight=%d)", lifecycle.in_flight)
 
 
@@ -82,6 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_health.router)
     app.include_router(routes_asr.router)
     app.include_router(routes_tts.router)
+    app.include_router(routes_chat.router)
     return app
 
 

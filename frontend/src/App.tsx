@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import AsrPage from "./pages/AsrPage";
 import TtsPage from "./pages/TtsPage";
+import ChatPage from "./pages/ChatPage";
 import { checkReady } from "./api/client";
 
 export default function App() {
-  const [tab, setTab] = useState<"asr" | "tts">("asr");
+  const [tab, setTab] = useState<"asr" | "tts" | "chat">("asr");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -39,9 +40,14 @@ export default function App() {
         <button className={`tab ${tab === "tts" ? "active" : ""}`} onClick={() => setTab("tts")}>
           语音合成 (TTS)
         </button>
+        <button className={`tab ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>
+          语音对话 (Chat)
+        </button>
       </div>
 
-      {tab === "asr" ? <AsrPage /> : <TtsPage />}
+      {tab === "asr" && <AsrPage />}
+      {tab === "tts" && <TtsPage />}
+      {tab === "chat" && <ChatPage />}
     </div>
   );
 }

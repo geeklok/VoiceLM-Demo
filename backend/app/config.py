@@ -112,6 +112,35 @@ class Settings(BaseSettings):
     # 下一段 LLM prefill, 消除句间播放间隙 (用一点 TTFB 换平滑)。0=不合并。
     tts_min_sentence_chars: int = 0
 
+    # ---- 语音聊天 (Phase 3 能力扩展: speech-to-speech) ----
+    # 总开关; False 或未配 agent_endpoint 时 /ws/chat 直接回 unavailable, 不影响 ASR/TTS。
+    chat_enabled: bool = False
+    # 远端 AI Agent: OpenAI 兼容 base (带或不带 /v1 均可, AgentClient 自动归一)。
+    agent_endpoint: str = ""
+    # 鉴权 key: 走 node-local .env.deploy, 不入库。
+    agent_api_key: str = ""
+    # 远端模型名, 如 gpt-4o / qwen-plus / ep-xxx。
+    agent_model: str = ""
+    # 系统人设: 语音场景要求简短口语化, 避免长篇回复拖慢 TTS。
+    agent_system_prompt: str = "你是一个友好的语音助手，用简短、口语化的中文回答，每次回复尽量不超过三句话。"
+    # 多轮窗口: 保留最近 N 轮 (user+assistant 成对); 超出截断, 防远端超 context。
+    agent_max_turns: int = 8
+    agent_temperature: float = 0.7
+    agent_max_tokens: int = 1024
+    # 出网超时 (秒): 首 token 超时单独设, 防远端挂死占连接。
+    agent_timeout: float = 60.0
+    agent_connect_timeout: float = 10.0
+    agent_first_token_timeout: float = 15.0
+    # 出网并发上限 (非 GPU): 限制同时挂在远端 Agent 的请求数。
+    agent_concurrency: int = 4
+    # 聊天回复音色 / 语速 (复用 CosyVoice 音色)。
+    agent_tts_voice: str = "default"
+    agent_tts_speed: float = 1.0
+    # 聊天用 ASR 模型 name (留空=默认 ASR, 线上即 funasr-streaming 真流式)。
+    agent_asr_model: str = ""
+    # 聊天 TTS 是否按句流式 (独立于全局 tts_sentence_stream; 聊天默认开以降首声延迟)。
+    chat_tts_sentence_stream: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

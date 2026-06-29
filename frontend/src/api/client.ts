@@ -130,6 +130,87 @@ export function openAsrStream(
   return ws;
 }
 
+export interface ChatQos {
+  node?: string;
+  first_token_ms?: number | null;
+  tts_ttfb_ms?: number | null;
+  total_ms?: number | null;
+}
+
+export interface ChatStartOptions {
+  sampleRate: number;
+  language: string;
+  systemPrompt?: string;
+  voice?: string;
+  speed?: number;
+}
+
+export interface ChatHandlers {
+  onReady?: (node?: string) => void;
+  onState?: (state: string, node?: string) => void;
+  onUserPartial?: (text: string, node?: string) => void;
+  onUserFinal?: (text: string, node?: string) => void;
+  onAssistantPartial?: (text: string, node?: string) => void;
+  onTtsMeta?: (sampleRate: number, node?: string, model?: string) => void;
+  onAudio?: (pcm: Int16Array) => void;
+  onAssistantDone?: (text: string, qos?: ChatQos, node?: string) => void;
+  onError?: (code: string, message: string) => void;
+}
+
+// 语音对话 (speech-to-speech): 上行 start 帧 + float32 16k PCM; 下行 ready/state/
+// user_partial/user_final/assistant_partial/tts_meta + 二进制 int16 音频/assistant_done/error。
+export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSocket {
+  const ws = new WebSocket(`${wsBase()}/ws/chat`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () =>
+    ws.send(
+      JSON.stringify({
+        type: "start",
+        sample_rate: opts.sampleRate,
+        channels: 1,
+        language: opts.language,
+        system_prompt: opts.systemPrompt || undefined,
+        voice: opts.voice || undefined,
+        speed: opts.speed,
+      })
+    );
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") {
+      h.onAudio?.(new Int16Array(ev.data as ArrayBuffer));
+      return;
+    }
+    const msg = JSON.parse(ev.data);
+    switch (msg.type) {
+      case "ready":
+        h.onReady?.(msg.node);
+        break;
+      case "state":
+        h.onState?.(msg.state, msg.node);
+        break;
+      case "user_partial":
+        h.onUserPartial?.(msg.text, msg.node);
+        break;
+      case "user_final":
+        h.onUserFinal?.(msg.text, msg.node);
+        break;
+      case "assistant_partial":
+        h.onAssistantPartial?.(msg.text, msg.node);
+        break;
+      case "tts_meta":
+        h.onTtsMeta?.(msg.sample_rate, msg.node, msg.model);
+        break;
+      case "assistant_done":
+        h.onAssistantDone?.(msg.text, msg.qos, msg.node);
+        break;
+      case "error":
+        h.onError?.(msg.code || "error", msg.message || "未知错误");
+        break;
+    }
+  };
+  ws.onerror = () => h.onError?.("ws", "WebSocket 错误");
+  return ws;
+}
+
 export function openTtsStream(
   text: string,
   voice: string,

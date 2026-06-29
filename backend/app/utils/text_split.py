@@ -6,6 +6,16 @@ _PRIMARY = "。！？!?；;\n"
 _SECONDARY = "，,、 "
 
 
+def ends_with_sentence_punct(text: str) -> bool:
+    """文本 (去尾部空白后) 是否以主断句标点结尾。
+
+    流式聊天用: 判断 LLM 增量缓冲区当前是否落在一个完整句末,
+    以决定能否把缓冲区整体送 TTS, 还是留下末段未完句继续等待。
+    """
+    s = (text or "").rstrip()
+    return bool(s) and s[-1] in _PRIMARY
+
+
 def split_sentences(text: str, max_chars: int = 60, min_chars: int = 0) -> list[str]:
     """按标点把文本分句, 让首句尽量短以降流式首包延迟。
 
