@@ -79,8 +79,15 @@ export default function AsrPage() {
   async function toggleRecord() {
     if (recording) {
       recRef.current?.stop();
-      wsRef.current?.send(JSON.stringify({ type: "end" }));
-      wsRef.current?.close();
+      // 仅发 end 收尾, 不主动 close: 非流式引擎 (sensevoice/paraformer) 在录音中只吐
+      // 时长占位符, 要等收到 end 把整段音频跑一次离线识别后才下发 final。抢先 close
+      // 会丢掉这条 final, 占位符停在 "... (Xs)" 不更新。等服务端发完 final 自行关闭,
+      // 由 ws.onclose 复位 UI。
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "end" }));
+      } else {
+        wsRef.current?.close();
+      }
       setRecording(false);
       return;
     }
@@ -105,6 +112,15 @@ export default function AsrPage() {
       model || undefined
     );
     wsRef.current = ws;
+    // 服务端发完 final 后会主动 close (见 routes_asr)。此处统一收尾: 清掉 "实时转写中..."
+    // 提示并复位录音态 (兼顾正常停止与连接异常断开)。仅当它仍是当前 socket 时才动 UI,
+    // 避免「快速停止→再开始」时旧连接的迟到 close 误伤新一轮录音。
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
+      setMeta((m) => (m === "实时转写中..." ? "" : m));
+      setRecording(false);
+    };
 
     const rec = new MicRecorder((pcm) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
