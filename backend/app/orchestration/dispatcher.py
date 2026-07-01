@@ -138,6 +138,7 @@ class Dispatcher:
         pcm_chunks: AsyncIterator[tuple[np.ndarray, int, int]],
         language: str = "auto",
         model: Optional[str] = None,
+        hotwords: Optional[list[str]] = None,
     ) -> AsyncIterator[ASRPartial]:
         engine = self._registry.asr(model)
         target_sr = engine.expected_sample_rate
@@ -147,7 +148,9 @@ class Dispatcher:
                 yield preprocess_pcm(raw, src_sr, src_ch, target_sr)
 
         async with self._limiter.asr_slot():
-            async for partial in engine.transcribe_stream(adapted(), language=language):
+            async for partial in engine.transcribe_stream(
+                adapted(), language=language, hotwords=hotwords
+            ):
                 yield partial
 
     async def tts_file(

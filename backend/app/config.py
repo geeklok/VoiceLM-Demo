@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     funasr_paraformer_model: str = ""
     # Paraformer 标点模型 (留空则用其自带的 vad-punc 组合模型)。
     funasr_punc_model: str = ""
+    # SeacoParaformer 热词模型: 唯一真正支持热词偏置 (bias encoder) 的 ASR。
+    # 留空则不注册。复用 paraformer flavor (同样不含标点, 挂 funasr_punc_model 恢复)。
+    # 仅文件式路径生效 (offline 模型), 实时流式仍走 paraformer-online 无热词。
+    funasr_seaco_model: str = ""
     # 默认 ASR 模型对外 name; 留空 = 第一个注册的引擎。
     default_asr_model: str = ""
 

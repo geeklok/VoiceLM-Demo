@@ -36,6 +36,10 @@ export default function AsrPage() {
     .join("");
   const hasContent = committedText.length > 0 || (partial?.text?.length ?? 0) > 0;
 
+  // 当前选中模型是否支持热词。未知模型 (列表未加载) 时默认允许编辑, 交由后端忽略。
+  const selectedModel = models.find((m) => m.name === model);
+  const hotwordsSupported = selectedModel ? !!selectedModel.supports_hotwords : true;
+
   useEffect(() => {
     fetchModels()
       .then((res) => {
@@ -56,7 +60,12 @@ export default function AsrPage() {
     setMeta("");
     setQos(null);
     try {
-      const res = await asrFile(file, language, hotwords, model || undefined);
+      const res = await asrFile(
+        file,
+        language,
+        hotwordsSupported ? hotwords : "",
+        model || undefined
+      );
       setCommitted({ 0: res.text });
       setMeta(`音频 ${res.audio_duration_ms}ms`);
       setQos({
@@ -109,7 +118,8 @@ export default function AsrPage() {
         if (node) setQos({ node, mode: "stream" });
       },
       (msg) => setError(msg),
-      model || undefined
+      model || undefined,
+      hotwordsSupported ? hotwords || undefined : undefined
     );
     wsRef.current = ws;
     // 服务端发完 final 后会主动 close (见 routes_asr)。此处统一收尾: 清掉 "实时转写中..."
@@ -160,8 +170,27 @@ export default function AsrPage() {
           </div>
         )}
         <div>
-          <label>热词 (逗号分隔, 可选)</label>
-          <input type="text" value={hotwords} onChange={(e) => setHotwords(e.target.value)} />
+          <label>
+            热词 (逗号分隔, 可选)
+            {selectedModel && !hotwordsSupported && (
+              <span style={{ color: "#9ca3af", fontWeight: "normal" }}>
+                {" "}
+                — 当前模型不支持
+              </span>
+            )}
+          </label>
+          <input
+            type="text"
+            value={hotwordsSupported ? hotwords : ""}
+            onChange={(e) => setHotwords(e.target.value)}
+            disabled={!hotwordsSupported}
+            placeholder={hotwordsSupported ? "" : "该模型不支持热词, 请选用 funasr-seaco"}
+            title={
+              hotwordsSupported
+                ? ""
+                : "该模型不支持热词偏置; 需真热词请选择支持的模型 (如 funasr-seaco)"
+            }
+          />
         </div>
       </div>
 

@@ -44,13 +44,32 @@ class EngineRegistry:
                     punc_model=s.funasr_punc_model,
                 )
                 self._asr[para.name] = para
+            # 第三个 ASR: SeacoParaformer 热词模型 (可选, 配了 model id 才注册)。
+            # 唯一真正支持热词偏置的引擎; 复用 paraformer flavor 走同一 transcribe
+            # 路径 (文件式已透传 hotword), 挂 punc_model 恢复标点。
+            seaco = None
+            if s.funasr_seaco_model:
+                seaco = FunASREngine(
+                    s,
+                    name="funasr-seaco",
+                    flavor="paraformer",
+                    model=s.funasr_seaco_model,
+                    punc_model=s.funasr_punc_model,
+                    supports_hotwords=True,
+                )
+                self._asr[seaco.name] = seaco
             # 真流式 2pass 引擎 (Phase 3, 可选): 配了流式 model id 才注册,
             # 复用 sensevoice 作 offline 修正引擎 (零额外大模型显存)。
+            # 若已注册 seaco, 作为热词定稿引擎注入: 带热词的流式请求句末改用 seaco
+            # 重解码, 不带热词仍走 sensevoice (保多语种/富文本), 均为已常驻引擎。
             if s.funasr_streaming_model:
                 from app.engines.funasr_engine import FunASRStreamingEngine
 
                 streaming = FunASRStreamingEngine(
-                    s, name="funasr-streaming", offline_engine=sense
+                    s,
+                    name="funasr-streaming",
+                    offline_engine=sense,
+                    hotword_engine=seaco,
                 )
                 self._asr[streaming.name] = streaming
         else:

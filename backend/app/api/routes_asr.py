@@ -60,6 +60,7 @@ async def asr_stream(websocket: WebSocket) -> None:
     channels = 1
     language = "auto"
     model: Optional[str] = None
+    hotwords: Optional[list[str]] = None
 
     # 第一帧: start 配置
     try:
@@ -72,6 +73,11 @@ async def asr_stream(websocket: WebSocket) -> None:
         channels = int(start.get("channels", 1))
         language = start.get("language", "auto")
         model = start.get("model") or None
+        # 热词: 逗号分隔字符串 (与文件式 /api/v1/asr 一致)。仅对 funasr-streaming
+        # 的句末定稿生效 (改用 seaco 重解码); 其它引擎忽略。
+        hw = start.get("hotwords")
+        if hw:
+            hotwords = [w.strip() for w in hw.split(",") if w.strip()] or None
 
     async def chunk_iter() -> AsyncIterator[tuple[np.ndarray, int, int]]:
         while True:
@@ -87,7 +93,9 @@ async def asr_stream(websocket: WebSocket) -> None:
                     break
 
     try:
-        async for partial in dispatcher.asr_stream(chunk_iter(), language=language, model=model):
+        async for partial in dispatcher.asr_stream(
+            chunk_iter(), language=language, model=model, hotwords=hotwords
+        ):
             await websocket.send_json(
                 {
                     "type": "final" if partial.is_final else "partial",

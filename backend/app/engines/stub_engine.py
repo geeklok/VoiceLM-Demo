@@ -26,7 +26,8 @@ class StubASREngine(ASREngine):
         return ASRResult(text=text, segments=[{"text": text, "start_ms": 0, "end_ms": int(dur_s * 1000)}])
 
     async def transcribe_stream(
-        self, chunks: AsyncIterator[np.ndarray], language: str = "auto"
+        self, chunks: AsyncIterator[np.ndarray], language: str = "auto",
+        hotwords: Optional[list[str]] = None,
     ) -> AsyncIterator[ASRPartial]:
         total = 0
         seg = 0

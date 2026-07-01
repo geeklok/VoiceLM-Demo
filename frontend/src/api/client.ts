@@ -36,6 +36,7 @@ export interface ModelInfo {
   expected_sample_rate: number;
   languages: string[];
   default?: boolean;
+  supports_hotwords?: boolean;
 }
 
 export interface ModelsResponse {
@@ -112,13 +113,21 @@ export function openAsrStream(
   language: string,
   onPartial: (text: string, isFinal: boolean, segmentId: number, node?: string) => void,
   onError: (msg: string) => void,
-  model?: string
+  model?: string,
+  hotwords?: string
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/asr`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () =>
     ws.send(
-      JSON.stringify({ type: "start", sample_rate: sampleRate, channels: 1, language, model })
+      JSON.stringify({
+        type: "start",
+        sample_rate: sampleRate,
+        channels: 1,
+        language,
+        model,
+        hotwords: hotwords || undefined,
+      })
     );
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);

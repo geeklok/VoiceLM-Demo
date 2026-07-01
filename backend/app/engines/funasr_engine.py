@@ -34,6 +34,7 @@ class FunASREngine(ASREngine):
         model: Optional[str] = None,
         punc_model: str = "",
         languages: Optional[list[str]] = None,
+        supports_hotwords: bool = False,
     ) -> None:
         self._settings = settings
         self.name = name
@@ -42,6 +43,7 @@ class FunASREngine(ASREngine):
         self._punc_model = punc_model
         self.expected_sample_rate = 16000
         self.expected_channels = 1
+        self.supports_hotwords = supports_hotwords
         self.languages = languages or (
             ["auto", "zh", "en", "yue", "ja", "ko"] if flavor == "sensevoice" else ["zh"]
         )
@@ -121,7 +123,8 @@ class FunASREngine(ASREngine):
         return text.strip()
 
     async def transcribe_stream(
-        self, chunks: AsyncIterator[np.ndarray], language: str = "auto"
+        self, chunks: AsyncIterator[np.ndarray], language: str = "auto",
+        hotwords: Optional[list[str]] = None,
     ) -> AsyncIterator[ASRPartial]:
         # MVP: 累积音频后整段转写 (SenseVoice 为非自回归, 走 offline pass)。
         # 真正的低延迟流式 partial 在 Phase 3 引入 paraformer-streaming / 2pass。
@@ -131,7 +134,7 @@ class FunASREngine(ASREngine):
             secs = sum(len(c) for c in buf) / self.expected_sample_rate
             yield ASRPartial(text=f"... ({secs:.1f}s)", is_final=False)
         pcm = np.concatenate(buf) if buf else np.zeros(0, dtype=np.float32)
-        result = await self.transcribe(pcm, language=language)
+        result = await self.transcribe(pcm, language=language, hotwords=hotwords)
         yield ASRPartial(text=result.text, is_final=True)
 
 
@@ -141,9 +144,15 @@ class FunASRStreamingEngine(ASREngine):
     第一遍 (低延迟出字): paraformer-zh-streaming 真流式模型, 按聚合窗逐块增量出字,
     每个聚合块产出当前句的临时文本 (is_final=False)。
     第二遍 (字符修正): 流式 fsmn-vad 检测句子端点, 句末把该句原始音频交给已加载的
-    offline SenseVoice 整句重解码, 产出修正后的定稿 (is_final=True) 覆盖临时字。
+    offline 引擎整句重解码, 产出修正后的定稿 (is_final=True) 覆盖临时字。
 
-    复用 offline_engine (已注册的 SenseVoice) 做 2pass, 零额外大模型显存;
+    定稿引擎动态选择 (零额外显存, 两引擎均已常驻):
+    - 不带热词: 用 offline_engine (SenseVoice), 保多语种 + 情感富文本。
+    - 带热词:   用 hotword_engine (SeacoParaformer), 唯一支持热词偏置的引擎。
+      未注入 hotword_engine 时 (未配 seaco) 回退到 offline_engine, 热词被忽略。
+    第一遍滚动临时字始终无热词 (paraformer-online 架构限制), 句末被定稿覆盖。
+
+    复用已注册引擎做 2pass, 零额外大模型显存;
     仅额外加载 paraformer 流式 (~1GB) + 流式 vad 实例 (权重复用)。
 
     约定: ASRPartial.text 承载「当前这一句」的文本 (非累计全文), segment_id 为句序号。
@@ -155,12 +164,17 @@ class FunASRStreamingEngine(ASREngine):
         *,
         name: str = "funasr-streaming",
         offline_engine: ASREngine,
+        hotword_engine: Optional[ASREngine] = None,
     ) -> None:
         self._settings = settings
         self.name = name
         self._offline = offline_engine
+        self._hotword = hotword_engine
         self.expected_sample_rate = 16000
         self.expected_channels = 1
+        # 仅当注入了热词定稿引擎 (seaco) 时才对外声明支持热词; 否则句末定稿走
+        # SenseVoice, 热词无效 -> 前端应禁用热词框。
+        self.supports_hotwords = hotword_engine is not None
         self.languages = ["auto", "zh", "en"]
         self._asr = None
         self._vad = None
@@ -203,11 +217,18 @@ class FunASRStreamingEngine(ASREngine):
             decoder_chunk_look_back=s.funasr_streaming_decoder_look_back,
         )
 
+    def _finalize_engine(self, hotwords: Optional[list[str]]) -> ASREngine:
+        """定稿引擎: 带热词且已注入 hotword_engine 时用它, 否则用 offline。"""
+        if hotwords and self._hotword is not None:
+            return self._hotword
+        return self._offline
+
     async def transcribe(
         self, pcm: np.ndarray, language: str = "auto", hotwords: Optional[list[str]] = None
     ) -> ASRResult:
-        # 文件式: 委托 offline SenseVoice, 质量与基线一致。
-        return await self._offline.transcribe(pcm, language=language, hotwords=hotwords)
+        # 文件式: 委托定稿引擎 (带热词 -> seaco, 否则 SenseVoice), 质量与基线一致。
+        engine = self._finalize_engine(hotwords)
+        return await engine.transcribe(pcm, language=language, hotwords=hotwords)
 
     @staticmethod
     def _result_text(res) -> str:
@@ -226,11 +247,14 @@ class FunASRStreamingEngine(ASREngine):
         return False
 
     async def transcribe_stream(
-        self, chunks: AsyncIterator[np.ndarray], language: str = "auto"
+        self, chunks: AsyncIterator[np.ndarray], language: str = "auto",
+        hotwords: Optional[list[str]] = None,
     ) -> AsyncIterator[ASRPartial]:
         self._load()
         s = self._settings
         win = int(self.expected_sample_rate * s.funasr_streaming_chunk_ms / 1000)
+        # 句末定稿引擎: 带热词 -> seaco, 否则 SenseVoice (整轮固定, 不逐句切)。
+        finalize = self._finalize_engine(hotwords)
         buf: list[np.ndarray] = []
         seg_audio: list[np.ndarray] = []
         seg_text = ""
@@ -263,7 +287,9 @@ class FunASRStreamingEngine(ASREngine):
                 return fallback
             try:
                 pcm = np.concatenate(audio)
-                fixed = (await self._offline.transcribe(pcm, language=language)).text
+                fixed = (
+                    await finalize.transcribe(pcm, language=language, hotwords=hotwords)
+                ).text
                 return fixed or fallback
             except Exception:  # noqa: BLE001
                 logger.warning("stream 2pass correction failed; keep streaming text")

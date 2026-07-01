@@ -36,6 +36,8 @@ class ModelInfo(BaseModel):
     expected_sample_rate: int
     languages: list[str] = Field(default_factory=list)
     default: bool = False
+    # 是否支持热词偏置 (仅 ASR); 前端据此启用/禁用热词输入框。
+    supports_hotwords: bool = False
 
 
 class ModelsResponse(BaseModel):

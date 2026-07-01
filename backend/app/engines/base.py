@@ -31,6 +31,9 @@ class ASREngine(ABC):
     expected_sample_rate: int = 16000
     expected_channels: int = 1
     languages: list[str] = ["zh", "en"]
+    # 是否真正支持热词偏置 (bias encoder)。默认 False; 仅 SeacoParaformer 及
+    # 以其定稿的流式引擎为 True。供前端按能力启用/禁用热词输入框。
+    supports_hotwords: bool = False
 
     @abstractmethod
     async def transcribe(
@@ -46,8 +49,13 @@ class ASREngine(ABC):
         self,
         chunks: AsyncIterator[np.ndarray],
         language: str = "auto",
+        hotwords: Optional[list[str]] = None,
     ) -> AsyncIterator[ASRPartial]:
-        """流式转写。输入 PCM 块异步迭代器, 产出 partial/final。"""
+        """流式转写。输入 PCM 块异步迭代器, 产出 partial/final。
+
+        hotwords 仅对支持 2pass 定稿的实现 (FunASRStreamingEngine) 生效:
+        句末定稿时改用热词引擎重解码。第一遍滚动临时字始终无热词。
+        """
 
     async def warmup(self) -> None:
         """预热: 触发权重加载 / kernel 编译。Phase 2 强化。"""

@@ -67,3 +67,30 @@ def test_paraformer_absent_when_not_configured():
     s = Settings(asr_engine="funasr", tts_engine="stub", funasr_paraformer_model="")
     reg = EngineRegistry(s)
     assert "funasr-paraformer-zh" not in reg.asr_engines
+
+
+def test_seaco_supports_hotwords_and_streaming_inherits():
+    # 配了 seaco + streaming: seaco 与 streaming 均声明支持热词, sensevoice 不支持。
+    s = Settings(
+        asr_engine="funasr",
+        tts_engine="stub",
+        funasr_seaco_model="iic/seaco",
+        funasr_streaming_model="iic/paraformer-online",
+    )
+    reg = EngineRegistry(s)
+    assert reg.asr_engines["funasr-seaco"].supports_hotwords is True
+    assert reg.asr_engines["funasr-streaming"].supports_hotwords is True
+    assert reg.asr_engines["funasr-sensevoice"].supports_hotwords is False
+
+
+def test_streaming_no_hotwords_without_seaco():
+    # 未配 seaco: streaming 句末定稿走 sensevoice, 不声明支持热词。
+    s = Settings(
+        asr_engine="funasr",
+        tts_engine="stub",
+        funasr_seaco_model="",
+        funasr_streaming_model="iic/paraformer-online",
+    )
+    reg = EngineRegistry(s)
+    assert "funasr-seaco" not in reg.asr_engines
+    assert reg.asr_engines["funasr-streaming"].supports_hotwords is False

@@ -47,6 +47,7 @@ async def models(request: Request) -> ModelsResponse:
                 expected_sample_rate=e.expected_sample_rate,
                 languages=e.languages,
                 default=(e.name == reg.default_asr),
+                supports_hotwords=e.supports_hotwords,
             )
             for e in reg.asr_engines.values()
         ],
