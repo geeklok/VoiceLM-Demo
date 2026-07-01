@@ -18,6 +18,7 @@ from app.orchestration.breaker import CircuitBreaker
 from app.orchestration.limiter import ConcurrencyLimitError, GpuLimiter
 from app.schemas.models import ASRResponse, ASRSegment
 from app.utils.logging import get_logger
+from app.utils.text_clean import strip_markdown
 from app.utils.text_split import split_sentences
 
 logger = get_logger(__name__)
@@ -158,6 +159,7 @@ class Dispatcher:
     ) -> tuple[np.ndarray, int, dict]:
         engine = self._registry.tts(model)
         sr = engine.output_sample_rate
+        text = strip_markdown(text)
         try:
             async with self._limiter.tts_slot():
                 t0 = time.perf_counter()
@@ -199,14 +201,15 @@ class Dispatcher:
 
         async def guarded() -> AsyncIterator[np.ndarray]:
             try:
+                clean = strip_markdown(text)
                 if self._tts_sentence_stream:
                     sentences = split_sentences(
-                        text,
+                        clean,
                         self._tts_max_sentence_chars,
                         self._tts_min_sentence_chars,
-                    ) or [text]
+                    ) or [clean]
                 else:
-                    sentences = [text]
+                    sentences = [clean]
                 async with self._limiter.tts_slot():
                     t0 = time.perf_counter()
                     first = True
