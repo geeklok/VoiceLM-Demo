@@ -209,3 +209,109 @@ def test_truncate_keeps_system_and_recent_turns():
     assert len(orch._messages) == 5
     assert orch._messages[-1] == {"role": "assistant", "content": "a4"}
     assert orch._messages[1] == {"role": "user", "content": "u3"}
+
+
+class _SlowAgent(_FakeAgent):
+    """按 token 逐个产出, 每个之间 sleep, 给 barge watcher 留出触发窗口。"""
+
+    async def stream_chat(self, messages):
+        self.seen_messages = list(messages)
+        for tok in self._tokens:
+            await asyncio.sleep(0.03)
+            yield tok
+
+
+class _BargeWS(_FakeWS):
+    """持续投递麦克风 PCM 帧, 直到看到 interrupted 帧才放行断开。
+
+    responding 阶段这些帧被路由到 _barge_q, 供 watcher 检测插话。
+    """
+
+    def __init__(self, start: dict, pcm: bytes) -> None:
+        super().__init__(start, pcm)
+        self._pcm_bytes = pcm
+
+    async def receive(self):
+        if self._turn_done.is_set():
+            return {"type": "websocket.disconnect"}
+        await asyncio.sleep(0.005)
+        return {"type": "websocket.receive", "bytes": self._pcm_bytes}
+
+    async def send_json(self, obj):
+        self.sent.append(obj)
+        if obj.get("type") == "interrupted":
+            self._turn_done.set()
+
+
+def _barge_settings() -> Settings:
+    return Settings(
+        agent_system_prompt="测试人设",
+        agent_first_token_timeout=5.0,
+        tts_max_sentence_chars=60,
+        chat_tts_sentence_stream=True,
+        chat_barge_in=True,
+        chat_barge_in_min_chars=2,
+    )
+
+
+def test_barge_in_interrupts_response():
+    # 无标点单字 token: 全程缓冲不触发 speak, 停在 deltas 循环让 watcher 有时间打断。
+    disp = _FakeDispatcher(final_text="讲个笑话")
+    agent = _SlowAgent(tokens=list("你好呢今天气不错哦啊"))
+    pcm = np.zeros(160, dtype=np.float32).tobytes()
+    ws = _BargeWS({"type": "start", "sample_rate": 16000, "channels": 1}, pcm)
+    orch = ConversationOrchestrator(disp, agent, _barge_settings())
+
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+
+    types = _types(ws)
+    # 被打断: 下发 interrupted, 且本轮不发 assistant_done
+    assert "interrupted" in types
+    assert "assistant_done" not in types
+    # Agent 未产完所有 token 就被中止 (打断早于 token 耗尽)
+    assert len(agent._tokens) == 10
+    done = next((m for m in ws.sent if m.get("type") == "assistant_done"), None)
+    assert done is None
+    assert ws.closed is True
+
+
+def test_barge_in_off_completes_turn_despite_audio():
+    # barge-in 关 (默认): responding 期间的音频被丢弃, 整轮正常完成。
+    disp = _FakeDispatcher(final_text="讲个笑话")
+    agent = _SlowAgent(tokens=["你好，", "再见！"])
+    pcm = np.zeros(160, dtype=np.float32).tobytes()
+    # 用普通 _FakeWS: 只投一帧 PCM, 不持续灌音频
+    ws = _FakeWS({"type": "start", "sample_rate": 16000, "channels": 1}, pcm)
+    s = _settings()  # chat_barge_in 默认 False
+    orch = ConversationOrchestrator(disp, agent, s)
+
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+
+    types = _types(ws)
+    assert "assistant_done" in types
+    assert "interrupted" not in types
+
+
+def test_start_frame_barge_in_overrides_settings():
+    # 前端 start 帧显式传 barge_in, 覆盖 env 默认 (两个方向都覆盖)。
+    disp = _FakeDispatcher("x")
+
+    # settings 默认关, start 传 True -> 开
+    orch_on = ConversationOrchestrator(disp, _FakeAgent([]), _settings())
+    assert orch_on._barge_on is False
+    ws_on = _FakeWS(
+        {"type": "start", "sample_rate": 16000, "channels": 1, "barge_in": True},
+        np.zeros(160, dtype=np.float32).tobytes(),
+    )
+    asyncio.run(asyncio.wait_for(orch_on.run(ws_on), timeout=5.0))
+    assert orch_on._barge_on is True
+
+    # settings 默认开, start 传 False -> 关
+    orch_off = ConversationOrchestrator(disp, _FakeAgent([]), _barge_settings())
+    assert orch_off._barge_on is True
+    ws_off = _FakeWS(
+        {"type": "start", "sample_rate": 16000, "channels": 1, "barge_in": False},
+        np.zeros(160, dtype=np.float32).tobytes(),
+    )
+    asyncio.run(asyncio.wait_for(orch_off.run(ws_off), timeout=5.0))
+    assert orch_off._barge_on is False

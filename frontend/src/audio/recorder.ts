@@ -30,7 +30,15 @@ export class MicRecorder {
   constructor(private onChunk: (pcm16k: Float32Array) => void) {}
 
   async start(): Promise<void> {
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 开浏览器端 AEC/降噪/自动增益: barge-in 场景抑制外放回声被麦克风采回,
+    // 避免把 AI 自己的声音当成用户插话 (自打断)。免耳机的基本保障。
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     this.ctx = new AudioContext();
     this.source = this.ctx.createMediaStreamSource(this.stream);
     this.processor = this.ctx.createScriptProcessor(4096, 1, 1);

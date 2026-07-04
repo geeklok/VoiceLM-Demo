@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     agent_asr_model: str = ""
     # 聊天 TTS 是否按句流式 (独立于全局 tts_sentence_stream; 聊天默认开以降首声延迟)。
     chat_tts_sentence_stream: bool = True
+    # barge-in (说话打断): 开启后 RESPONDING 期间继续收音跑 ASR, 识别到用户插话即
+    # 中止当前 Agent 流 + TTS 播放, 回到 LISTENING。默认关 = 保持半双工 (无 AEC 最稳)。
+    # 依赖前端浏览器 AEC 抑制外放回声; 用「识别到 >=N 个实际字」而非纯能量做判据, 滤回声。
+    chat_barge_in: bool = False
+    # 打断判据: RESPONDING 期间 ASR partial 累计实际字符数 >= 该值才触发打断 (滤残余回声/噪声)。
+    chat_barge_in_min_chars: int = 2
 
 
 @lru_cache

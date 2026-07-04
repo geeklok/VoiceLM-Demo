@@ -45,6 +45,11 @@ class ConversationOrchestrator:
         # 在无运行 loop 的上下文 (如同步构造) 提前创建会抛 RuntimeError。
         self._pcm_q: Optional[asyncio.Queue] = None
         self._stop: Optional[asyncio.Event] = None
+        # barge-in (说话打断): 开启后 RESPONDING 期间麦克风 PCM 入 _barge_q, 由 watcher
+        # 跑 ASR 检测用户插话; _interrupt 置位即中止当前 Agent 流 + TTS。默认关=半双工。
+        self._barge_on = bool(settings.chat_barge_in)
+        self._barge_q: Optional[asyncio.Queue] = None
+        self._interrupt: Optional[asyncio.Event] = None
         # 连接级参数 (首帧 start 可覆盖)
         self._sample_rate = 16000
         self._channels = 1
@@ -62,6 +67,8 @@ class ConversationOrchestrator:
     async def run(self, ws: WebSocket) -> None:
         self._pcm_q = asyncio.Queue()
         self._stop = asyncio.Event()
+        self._barge_q = asyncio.Queue()
+        self._interrupt = asyncio.Event()
         if not self._agent.configured:
             await self._safe_send(
                 ws, {"type": "error", "code": "unavailable", "message": "语音聊天未启用"}
@@ -85,6 +92,9 @@ class ConversationOrchestrator:
                 self._voice = str(start["voice"])
             if start.get("speed"):
                 self._speed = float(start["speed"])
+            # barge-in: 前端可显式选择开/关, 覆盖 env 默认; 未传则用 settings 默认。
+            if "barge_in" in start:
+                self._barge_on = bool(start["barge_in"])
 
         reader = asyncio.create_task(self._read_loop(ws))
         await self._safe_send(ws, {"type": "ready", "node": self._node})
@@ -120,10 +130,14 @@ class ConversationOrchestrator:
                 if msg.get("type") == "websocket.disconnect":
                     break
                 if msg.get("bytes") is not None:
-                    # v1 无 barge-in: 仅 LISTENING 阶段收音, 其余丢弃避免回声/抢话。
                     if self._state == "listening":
                         pcm = np.frombuffer(msg["bytes"], dtype=np.float32).copy()
                         await self._pcm_q.put((pcm, self._sample_rate, self._channels))
+                    elif self._barge_on and self._state == "responding":
+                        # barge-in: RESPONDING 期间收音送 watcher 检测插话 (依赖前端 AEC 滤回声)。
+                        pcm = np.frombuffer(msg["bytes"], dtype=np.float32).copy()
+                        await self._barge_q.put((pcm, self._sample_rate, self._channels))
+                    # THINKING 阶段或 barge-in 关闭: 丢弃 (避免回声/抢话)。
                 elif msg.get("text") is not None:
                     try:
                         ctrl = json.loads(msg["text"])
@@ -136,6 +150,7 @@ class ConversationOrchestrator:
         finally:
             self._stop.set()
             await self._pcm_q.put(None)  # 解阻塞正在等待的 listener
+            await self._barge_q.put(None)  # 解阻塞正在等待的 barge watcher
 
     # ---- LISTENING: 流式 ASR 直到 VAD 句末 --------------------------------
 
@@ -184,11 +199,13 @@ class ConversationOrchestrator:
         assistant_full = ""
         buffer = ""
         meta_sent = False
+        interrupted = False
 
-        async def speak(sentence: str) -> None:
+        async def speak(sentence: str) -> bool:
+            """合成并下发一句; 返回 True 表示中途被打断 (barge-in)。"""
             nonlocal meta_sent, tts_ttfb_ms
             if not sentence.strip():
-                return
+                return False
             stream, sr, meta, _qos = await self._disp.tts_stream(
                 sentence, self._voice, self._speed, None
             )
@@ -200,12 +217,17 @@ class ConversationOrchestrator:
                 )
                 meta_sent = True
             async for pcm_chunk in stream:
+                if self._barge_on and self._interrupt.is_set():
+                    await _aclose(stream)  # 停 TTS: 关闭生成器, 丢弃剩余音频
+                    return True
                 if tts_ttfb_ms is None:
                     tts_ttfb_ms = int((time.perf_counter() - t_start) * 1000)
                 await ws.send_bytes(pcm_to_int16_bytes(pcm_chunk))
+            return False
 
+        watcher: Optional[asyncio.Task] = None
+        agen = self._agent.stream_chat(self._messages).__aiter__()
         try:
-            agen = self._agent.stream_chat(self._messages).__aiter__()
             # 首 token 单独超时, 防远端挂死。
             try:
                 first = await asyncio.wait_for(
@@ -214,13 +236,17 @@ class ConversationOrchestrator:
             except StopAsyncIteration:
                 first = None
             except asyncio.TimeoutError as exc:
-                await _aclose(agen)
                 raise AgentError("Agent 首 token 超时") from exc
 
             if first is not None:
                 first_token_ms = int((time.perf_counter() - t_start) * 1000)
                 self._state = "responding"
                 await self._send_state(ws, "responding")
+                # barge-in: 进入 RESPONDING 才起 watcher (此后 _read_loop 把 PCM 路由到 _barge_q)。
+                if self._barge_on:
+                    self._interrupt.clear()
+                    self._drain_barge()
+                    watcher = asyncio.create_task(self._watch_interrupt())
 
                 async def deltas() -> AsyncIterator[str]:
                     yield first
@@ -228,6 +254,9 @@ class ConversationOrchestrator:
                         yield d
 
                 async for delta in deltas():
+                    if self._barge_on and self._interrupt.is_set():
+                        interrupted = True
+                        break
                     assistant_full += delta
                     buffer += delta
                     await self._safe_send(
@@ -237,13 +266,18 @@ class ConversationOrchestrator:
                     complete, buffer = self._pop_complete(buffer)
                     for sent in complete:
                         if self._s.chat_tts_sentence_stream:
-                            await speak(sent)
-                # flush 末段残余
-                if self._s.chat_tts_sentence_stream and buffer.strip():
-                    await speak(buffer)
-                elif not self._s.chat_tts_sentence_stream and assistant_full.strip():
-                    # 关闭按句流式: 整段一次合成。
-                    await speak(assistant_full)
+                            if await speak(sent):
+                                interrupted = True
+                                break
+                    if interrupted:
+                        break
+                # flush 末段残余 (未被打断时)
+                if not interrupted:
+                    if self._s.chat_tts_sentence_stream and buffer.strip():
+                        interrupted = await speak(buffer)
+                    elif not self._s.chat_tts_sentence_stream and assistant_full.strip():
+                        # 关闭按句流式: 整段一次合成。
+                        interrupted = await speak(assistant_full)
         except (AgentError, ConcurrencyLimitError) as exc:
             code = "busy" if isinstance(exc, ConcurrencyLimitError) else "agent"
             await self._safe_send(
@@ -253,9 +287,25 @@ class ConversationOrchestrator:
             return
         except WebSocketDisconnect:
             raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                try:
+                    await watcher
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            await _aclose(agen)
+            self._drain_barge()
 
+        # 写回 messages: 即使被打断, 已说出的部分也写回 (保留多轮上下文连贯)。
         if assistant_full.strip():
             self._messages.append({"role": "assistant", "content": assistant_full})
+
+        if interrupted:
+            # 打断: 通知前端停播 + 清字幕, 直接回 LISTENING 接住用户新话 (不发 assistant_done)。
+            await self._safe_send(ws, {"type": "interrupted", "node": self._node})
+            self._state = "listening"
+            return
 
         total_ms = int((time.perf_counter() - t_start) * 1000)
         await self._safe_send(
@@ -273,6 +323,33 @@ class ConversationOrchestrator:
             },
         )
         self._state = "listening"
+
+    # ---- barge-in: RESPONDING 期间检测用户插话 -------------------------------
+
+    async def _watch_interrupt(self) -> None:
+        """跑轻量流式 ASR 检测插话; 识别到 >=min_chars 个实际字即置 _interrupt。
+
+        判据用「识别到实际文字」而非纯 VAD 能量: 依赖前端浏览器 AEC 抑制外放回声后,
+        残余回声不足以形成有效文字, 从而滤掉自打断。watcher 失败不影响主流程 (最坏=本轮不可打断)。
+        """
+        async def chunk_iter() -> AsyncIterator[tuple[np.ndarray, int, int]]:
+            while True:
+                item = await self._barge_q.get()
+                if item is None:  # stop / 断开哨兵
+                    return
+                yield item
+
+        try:
+            async for partial in self._disp.asr_stream(
+                chunk_iter(), language=self._language, model=self._asr_model
+            ):
+                text = (partial.text or "")
+                n = sum(1 for c in text if not c.isspace())
+                if n >= self._s.chat_barge_in_min_chars:
+                    self._interrupt.set()
+                    return
+        except (ConcurrencyLimitError, Exception):  # noqa: BLE001
+            return
 
     # ---- 工具 ------------------------------------------------------------
 
@@ -302,6 +379,13 @@ class ConversationOrchestrator:
         while not self._pcm_q.empty():
             try:
                 self._pcm_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    def _drain_barge(self) -> None:
+        while not self._barge_q.empty():
+            try:
+                self._barge_q.get_nowait()
             except asyncio.QueueEmpty:
                 break
 

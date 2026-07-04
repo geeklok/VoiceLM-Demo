@@ -4,6 +4,7 @@ export class StreamingPcmPlayer {
   private sampleRate = 24000;
   private nextTime = 0;
   private chunks: Int16Array[] = [];
+  private sources: Set<AudioBufferSourceNode> = new Set();
 
   constructor() {
     this.ctx = new AudioContext();
@@ -26,6 +27,23 @@ export class StreamingPcmPlayer {
     const start = Math.max(now, this.nextTime);
     src.start(start);
     this.nextTime = start + buf.duration;
+    // 保留引用以便 barge-in 打断时停掉所有已排队 source。
+    this.sources.add(src);
+    src.onended = () => this.sources.delete(src);
+  }
+
+  /** barge-in 打断: 立即停掉所有已排队/在播的音频, 复位播放游标。 */
+  stop(): void {
+    for (const src of this.sources) {
+      try {
+        src.onended = null;
+        src.stop();
+      } catch {
+        /* 已停止/未开始, 忽略 */
+      }
+    }
+    this.sources.clear();
+    this.nextTime = 0;
   }
 
   /** 合并所有块为 WAV Blob, 供下载。 */

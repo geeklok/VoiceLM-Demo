@@ -152,6 +152,7 @@ export interface ChatStartOptions {
   systemPrompt?: string;
   voice?: string;
   speed?: number;
+  bargeIn?: boolean;
 }
 
 export interface ChatHandlers {
@@ -163,6 +164,7 @@ export interface ChatHandlers {
   onTtsMeta?: (sampleRate: number, node?: string, model?: string) => void;
   onAudio?: (pcm: Int16Array) => void;
   onAssistantDone?: (text: string, qos?: ChatQos, node?: string) => void;
+  onInterrupted?: (node?: string) => void;
   onError?: (code: string, message: string) => void;
 }
 
@@ -181,6 +183,7 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
         system_prompt: opts.systemPrompt || undefined,
         voice: opts.voice || undefined,
         speed: opts.speed,
+        barge_in: opts.bargeIn,
       })
     );
   ws.onmessage = (ev) => {
@@ -210,6 +213,9 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
         break;
       case "assistant_done":
         h.onAssistantDone?.(msg.text, msg.qos, msg.node);
+        break;
+      case "interrupted":
+        h.onInterrupted?.(msg.node);
         break;
       case "error":
         h.onError?.(msg.code || "error", msg.message || "未知错误");

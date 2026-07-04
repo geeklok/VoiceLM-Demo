@@ -30,6 +30,7 @@ export default function ChatPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [speed, setSpeed] = useState(1.0);
+  const [bargeIn, setBargeIn] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
@@ -69,7 +70,7 @@ export default function ChatPage() {
     playerRef.current = player;
 
     const ws = openChatStream(
-      { sampleRate: TARGET_SR, language: "auto", systemPrompt, speed },
+      { sampleRate: TARGET_SR, language: "auto", systemPrompt, speed, bargeIn },
       {
         onReady: (n) => {
           setNode(n);
@@ -91,6 +92,14 @@ export default function ChatPage() {
         onAssistantDone: (t, qos, n) => {
           setAssistantPartial("");
           if (t.trim()) setMessages((m) => [...m, { role: "assistant", text: t, qos, node: n }]);
+        },
+        onInterrupted: () => {
+          // barge-in: 用户插话打断了 AI。立即停外放, 把已说出的半句落为定稿气泡。
+          player.stop();
+          setAssistantPartial((cur) => {
+            if (cur.trim()) setMessages((m) => [...m, { role: "assistant", text: cur }]);
+            return "";
+          });
         },
         onError: (code, message) => {
           if (code === "unavailable") {
@@ -191,6 +200,14 @@ export default function ChatPage() {
             onChange={(e) => setSpeed(parseFloat(e.target.value))}
             style={{ width: "100%" }}
           />
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={bargeIn}
+              onChange={(e) => setBargeIn(e.target.checked)}
+            />
+            说话打断 (barge-in)：AI 回答时可插话打断，建议戴耳机
+          </label>
         </div>
       )}
 
