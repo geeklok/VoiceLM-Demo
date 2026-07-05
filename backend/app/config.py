@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # VAD 单段最大时长 (ms), 长音频切分用; SenseVoice 推荐 30000
     funasr_vad_max_segment_ms: int = 30000
     funasr_use_itn: bool = True
+    # 非语音事件过滤: SenseVoice 富文本标签里若命中咳嗽/喷嚏/呼吸/掌声/笑声/BGM 等
+    # 非语言声, 判为噪声 (返回空文本), 交由上层门控丢弃, 避免咳嗽被误转成拟声词触发对话。
+    funasr_drop_nonspeech_events: bool = True
 
     # ---- 真流式 ASR (Phase 3: 实时录音转写 2pass) ----
     # paraformer 流式模型 id/路径; 留空 = 不注册流式引擎 (节点保持伪流式基线)。
@@ -150,6 +153,12 @@ class Settings(BaseSettings):
     chat_barge_in: bool = False
     # 打断判据: RESPONDING 期间 ASR partial 累计实际字符数 >= 该值才触发打断 (滤残余回声/噪声)。
     chat_barge_in_min_chars: int = 2
+    # 有效发言门控 (滤环境噪声误触发): LISTENING 拿到 VAD 定稿后, 仅当满足下列两项才
+    # 交给 Agent, 否则丢弃继续听。挡掉噪声被误识别成的单字/瞬时脉冲。
+    # 定稿文本去标点/空白后的实际字数下限 (<该值视为噪声, 如误识别的单字)。
+    chat_min_speech_chars: int = 2
+    # 该段语音累计时长下限 (毫秒; <该值视为瞬时噪声脉冲)。
+    chat_min_speech_ms: int = 300
 
 
 @lru_cache

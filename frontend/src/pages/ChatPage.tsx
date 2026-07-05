@@ -31,6 +31,7 @@ export default function ChatPage() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [speed, setSpeed] = useState(1.0);
   const [bargeIn, setBargeIn] = useState(false);
+  const [vadGate, setVadGate] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
@@ -117,10 +118,12 @@ export default function ChatPage() {
   }
 
   async function startMic(ws: WebSocket) {
-    const rec = new MicRecorder((pcm) => {
-      // 持续上送; 后端在 thinking/responding 阶段丢弃 (v1 无 barge-in)。
-      if (ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
-    });
+    const rec = new MicRecorder(
+      (pcm) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+      },
+      { gateVad: vadGate }
+    );
     recRef.current = rec;
     try {
       await rec.start();
@@ -200,6 +203,14 @@ export default function ChatPage() {
             onChange={(e) => setSpeed(parseFloat(e.target.value))}
             style={{ width: "100%" }}
           />
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={vadGate}
+              onChange={(e) => setVadGate(e.target.checked)}
+            />
+            静音门控 (VAD)：仅在检测到说话时上送，过滤环境噪声
+          </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"

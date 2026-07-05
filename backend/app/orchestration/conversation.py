@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import unicodedata
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -158,11 +159,19 @@ class ConversationOrchestrator:
         self._state = "listening"
         self._drain_queue()
 
+        # 累计送入 ASR 的音频样本数, 用于"有效发言"的时长门控 (ASRPartial 不带时长)。
+        fed_samples = 0
+        sr_seen = self._sample_rate
+
         async def chunk_iter() -> AsyncIterator[tuple[np.ndarray, int, int]]:
+            nonlocal fed_samples, sr_seen
             while True:
                 item = await self._pcm_q.get()
                 if item is None:  # stop / end 哨兵
                     return
+                pcm, sr, _ch = item
+                fed_samples += len(pcm)
+                sr_seen = sr or sr_seen
                 yield item
 
         final_text: Optional[str] = None
@@ -171,11 +180,20 @@ class ConversationOrchestrator:
                 chunk_iter(), language=self._language, model=self._asr_model
             ):
                 if partial.is_final:
-                    final_text = partial.text
-                    await self._safe_send(
-                        ws, {"type": "user_final", "text": partial.text, "node": self._node}
+                    seg_ms = int(fed_samples / sr_seen * 1000) if sr_seen else 0
+                    if self._is_valid_speech(partial.text, seg_ms):
+                        final_text = partial.text
+                        await self._safe_send(
+                            ws, {"type": "user_final", "text": partial.text, "node": self._node}
+                        )
+                        break
+                    # 噪声/超短: 丢弃这一"句", 重置计数, 继续听 (不触发 Agent)。
+                    logger.info(
+                        "drop noise final: chars=%d ms=%d text=%r",
+                        _real_char_count(partial.text), seg_ms, partial.text[:20],
                     )
-                    break
+                    fed_samples = 0
+                    continue
                 await self._safe_send(
                     ws, {"type": "user_partial", "text": partial.text, "node": self._node}
                 )
@@ -186,6 +204,14 @@ class ConversationOrchestrator:
                  "message": str(exc)},
             )
         return final_text
+
+    def _is_valid_speech(self, text: str, seg_ms: int) -> bool:
+        """有效发言门控: 定稿实际字数与语音时长都达标才算真发言 (滤环境噪声误触发)。"""
+        if _real_char_count(text) < self._s.chat_min_speech_chars:
+            return False
+        if seg_ms < self._s.chat_min_speech_ms:
+            return False
+        return True
 
     # ---- THINKING + RESPONDING: Agent 流 → 按句 TTS --------------------------
 
@@ -344,8 +370,7 @@ class ConversationOrchestrator:
                 chunk_iter(), language=self._language, model=self._asr_model
             ):
                 text = (partial.text or "")
-                n = sum(1 for c in text if not c.isspace())
-                if n >= self._s.chat_barge_in_min_chars:
+                if _real_char_count(text) >= self._s.chat_barge_in_min_chars:
                     self._interrupt.set()
                     return
         except (ConcurrencyLimitError, Exception):  # noqa: BLE001
@@ -412,3 +437,20 @@ async def _aclose(agen) -> None:
         await agen.aclose()
     except Exception:  # noqa: BLE001
         pass
+
+
+def _real_char_count(text: str) -> int:
+    """统计"实际内容字符"数: 排除空白与标点/符号 (Unicode 类别 P*/S*)。
+
+    用于噪声门控与 barge-in 判据 —— 噪声常被误识别成单个字或纯标点,
+    去掉标点/空白后不足阈值即视为非有效发言。
+    """
+    n = 0
+    for c in text or "":
+        if c.isspace():
+            continue
+        cat = unicodedata.category(c)
+        if cat[0] in ("P", "S"):  # 标点 / 符号
+            continue
+        n += 1
+    return n

@@ -104,6 +104,9 @@ def _settings() -> Settings:
         agent_first_token_timeout=5.0,
         tts_max_sentence_chars=60,
         chat_tts_sentence_stream=True,
+        # 关闭噪声门控, 让既有 turn 测试专注状态机 (门控单测另设)。
+        chat_min_speech_chars=0,
+        chat_min_speech_ms=0,
     )
 
 
@@ -251,6 +254,8 @@ def _barge_settings() -> Settings:
         chat_tts_sentence_stream=True,
         chat_barge_in=True,
         chat_barge_in_min_chars=2,
+        chat_min_speech_chars=0,
+        chat_min_speech_ms=0,
     )
 
 
@@ -315,3 +320,82 @@ def test_start_frame_barge_in_overrides_settings():
     )
     asyncio.run(asyncio.wait_for(orch_off.run(ws_off), timeout=5.0))
     assert orch_off._barge_on is False
+
+
+def test_real_char_count_ignores_punct_and_space():
+    from app.orchestration.conversation import _real_char_count
+    assert _real_char_count("你好") == 2
+    assert _real_char_count("，。！ ") == 0        # 纯标点+空格
+    assert _real_char_count("嗯") == 1
+    assert _real_char_count(" a b ") == 2
+    assert _real_char_count("") == 0
+    assert _real_char_count("你好，世界！") == 4    # 去掉逗号感叹号
+
+
+def test_is_valid_speech_gate():
+    s = Settings(chat_min_speech_chars=2, chat_min_speech_ms=300)
+    orch = ConversationOrchestrator(_FakeDispatcher("x"), _FakeAgent([]), s)
+    assert orch._is_valid_speech("你好", 500) is True
+    assert orch._is_valid_speech("嗯", 500) is False       # 字数不足
+    assert orch._is_valid_speech("你好", 100) is False      # 时长不足
+    assert orch._is_valid_speech("，。", 500) is False      # 纯标点 -> 0 字
+
+
+class _SeqDispatcher(_FakeDispatcher):
+    """按序对每次 (完整) listen 产出不同 final; 每读满 win_chunks 个块出一次 final。
+
+    模拟: 第一段是噪声短词 (被门控丢弃), 第二段是有效发言 (通过)。
+    """
+
+    def __init__(self, finals: list[str], win_chunks: int = 1) -> None:
+        super().__init__(finals[0] if finals else "")
+        self._finals = list(finals)
+        self._win = win_chunks
+
+    async def asr_stream(self, chunks, language="auto", model=None):
+        idx = 0
+        got = 0
+        async for _chunk in chunks:
+            got += 1
+            if got >= self._win:
+                yield ASRPartial(text="…", is_final=False, segment_id=idx)
+                txt = self._finals[idx] if idx < len(self._finals) else self._finals[-1]
+                yield ASRPartial(text=txt, is_final=True, segment_id=idx)
+                idx += 1
+                got = 0
+
+
+class _MultiChunkWS(_FakeWS):
+    """持续投递 PCM 帧 (每帧 n_samples 样本) 直到 assistant_done, 供门控时长累计。"""
+
+    def __init__(self, start: dict, n_samples: int) -> None:
+        super().__init__(start, np.zeros(n_samples, dtype=np.float32).tobytes())
+        self._frame = np.zeros(n_samples, dtype=np.float32).tobytes()
+
+    async def receive(self):
+        if self._turn_done.is_set():
+            return {"type": "websocket.disconnect"}
+        await asyncio.sleep(0.002)
+        return {"type": "websocket.receive", "bytes": self._frame}
+
+
+def test_noise_final_dropped_then_valid_passes():
+    # 每帧 8000 样本 @16k = 500ms; win_chunks=1 => 每帧触发一次 final。
+    # 第一次 final="嗯"(噪声, 1字<2 被丢), 第二次 final="你好啊"(有效, 通过)。
+    disp = _SeqDispatcher(finals=["嗯", "你好啊"], win_chunks=1)
+    agent = _FakeAgent(tokens=["在", "呢"])
+    s = Settings(
+        agent_first_token_timeout=5.0, tts_max_sentence_chars=60,
+        chat_tts_sentence_stream=True,
+        chat_min_speech_chars=2, chat_min_speech_ms=300,
+    )
+    ws = _MultiChunkWS({"type": "start", "sample_rate": 16000, "channels": 1}, 8000)
+    orch = ConversationOrchestrator(disp, agent, s)
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+
+    # 只应有一次有效 user_final = "你好啊"; "嗯" 被门控丢弃 (不下发 user_final)。
+    finals = [m for m in ws.sent if m.get("type") == "user_final"]
+    assert len(finals) == 1
+    assert finals[0]["text"] == "你好啊"
+    # 交给 Agent 的用户消息也是有效那句
+    assert agent.seen_messages[-1] == {"role": "user", "content": "你好啊"}

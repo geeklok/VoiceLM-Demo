@@ -20,14 +20,39 @@ function downsample(buffer: Float32Array, srcSr: number, dstSr: number): Float32
  * 麦克风录音 → 16kHz 单声道 float32 PCM 块。
  * MVP 用 ScriptProcessorNode (兼容性最好); 浏览器在浏览器端完成降采样,
  * 减轻后端压力 (见技术方案 5.5)。
+ *
+ * 可选能量 VAD 门控 (gateVad): 开启后只在"有声"窗口上送 PCM, 静音期不发,
+ * 挡掉环境噪声/静音被上送后端误识别 (配合后端有效发言门控双保险)。
+ * 用 RMS 能量 + 自适应噪声底 + hangover (掉阈值后继续送一小段, 避免切句尾)。
  */
+export interface MicRecorderOptions {
+  gateVad?: boolean;          // 是否启用能量 VAD 门控 (默认 false = 原持续上送)
+  hangoverMs?: number;        // 判静音后继续上送时长 (默认 400ms, 防切句尾)
+  energyMarginDb?: number;    // 高于噪声底多少 dB 判为有声 (默认 6dB)
+}
+
 export class MicRecorder {
   private ctx?: AudioContext;
   private stream?: MediaStream;
   private processor?: ScriptProcessorNode;
   private source?: MediaStreamAudioSourceNode;
 
-  constructor(private onChunk: (pcm16k: Float32Array) => void) {}
+  // 能量 VAD 状态
+  private gateVad: boolean;
+  private hangoverMs: number;
+  private energyMarginDb: number;
+  private noiseFloor = 1e-4;   // 自适应噪声底 (RMS), 初值很小
+  private voiced = false;
+  private hangoverUntil = 0;   // performance.now() 时间戳, 在此之前继续送
+
+  constructor(
+    private onChunk: (pcm16k: Float32Array) => void,
+    opts: MicRecorderOptions = {}
+  ) {
+    this.gateVad = opts.gateVad ?? false;
+    this.hangoverMs = opts.hangoverMs ?? 400;
+    this.energyMarginDb = opts.energyMarginDb ?? 6;
+  }
 
   async start(): Promise<void> {
     // 开浏览器端 AEC/降噪/自动增益: barge-in 场景抑制外放回声被麦克风采回,
@@ -46,10 +71,33 @@ export class MicRecorder {
     this.processor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
       const resampled = downsample(new Float32Array(input), srcSr, TARGET_SR);
-      this.onChunk(resampled);
+      if (!this.gateVad || this.shouldSend(input)) {
+        this.onChunk(resampled);
+      }
     };
     this.source.connect(this.processor);
     this.processor.connect(this.ctx.destination);
+  }
+
+  /** 能量 VAD 判定 + hangover: 返回本块是否应上送。 */
+  private shouldSend(frame: Float32Array): boolean {
+    let sum = 0;
+    for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+    const rms = Math.sqrt(sum / frame.length) || 1e-7;
+    // 判定阈值 = 噪声底 * 10^(margin/20)
+    const threshold = this.noiseFloor * Math.pow(10, this.energyMarginDb / 20);
+    const now = performance.now();
+    if (rms >= threshold) {
+      this.voiced = true;
+      this.hangoverUntil = now + this.hangoverMs;
+    } else if (this.voiced && now >= this.hangoverUntil) {
+      this.voiced = false;
+    }
+    // 静音时缓慢抬高/贴合噪声底 (自适应); 有声时不更新, 避免把人声算进底噪。
+    if (!this.voiced) {
+      this.noiseFloor = 0.95 * this.noiseFloor + 0.05 * rms;
+    }
+    return this.voiced;
   }
 
   stop(): void {
@@ -61,6 +109,8 @@ export class MicRecorder {
     this.source = undefined;
     this.stream = undefined;
     this.ctx = undefined;
+    this.voiced = false;
+    this.hangoverUntil = 0;
   }
 }
 

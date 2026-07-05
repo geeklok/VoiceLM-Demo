@@ -14,6 +14,14 @@ logger = get_logger(__name__)
 # SenseVoiceSmall 支持的语言标签; 其余值回退到 auto
 _SUPPORTED_LANGS = {"auto", "zh", "en", "yue", "ja", "ko", "nospeech"}
 
+# SenseVoice 富文本事件标签中的「非语音声」: 命中即判为噪声, 不当作用户发言。
+# 咳嗽会被声学模型硬转成拟声词 (如「嗯哼」) 穿透字数门控, 但事件标签仍标为 <|Cough|>,
+# 这是区分「非语言声」vs「真实语音 <|Speech|>」的干净信号 (SenseVoice 不输出置信度)。
+_NONSPEECH_EVENT_TAGS = (
+    "<|BGM|>", "<|Applause|>", "<|Laughter|>", "<|Cry|>",
+    "<|Sneeze|>", "<|Breath|>", "<|Cough|>",
+)
+
 
 class FunASREngine(ASREngine):
     """FunASR 封装 (阿里 DAMO)。支持两种 flavor:
@@ -105,7 +113,12 @@ class FunASREngine(ASREngine):
             segments: list[dict] = []
             texts: list[str] = []
             for item in res or []:
-                clean = self._postprocess(item.get("text", ""))
+                raw = item.get("text", "")
+                # 非语音事件 (咳嗽/喷嚏/BGM 等): 事件标签命中即判噪声, 丢弃整段。
+                if self._flavor == "sensevoice" and self._is_nonspeech_event(raw):
+                    logger.info("drop non-speech event: %r", raw[:60])
+                    continue
+                clean = self._postprocess(raw)
                 if not clean:
                     continue
                 texts.append(clean)
@@ -113,6 +126,18 @@ class FunASREngine(ASREngine):
             return ASRResult(text="".join(texts), segments=segments)
 
         return await asyncio.to_thread(_run)
+
+    def _is_nonspeech_event(self, raw: str) -> bool:
+        """SenseVoice 原始富文本 (含事件标签) 是否为非语音声。
+
+        只对含事件标签且不含 <|Speech|> 的段生效: 命中非语音事件白名单即视为噪声。
+        与 <|Speech|> 共现时保守放行 (说话中夹杂咳嗽仍按说话处理)。
+        """
+        if not self._settings.funasr_drop_nonspeech_events:
+            return False
+        if "<|Speech|>" in raw:
+            return False
+        return any(tag in raw for tag in _NONSPEECH_EVENT_TAGS)
 
     def _postprocess(self, text: str) -> str:
         # SenseVoice 输出含 <|emo|><|event|> 等富文本标记, 需专用后处理剥离。
