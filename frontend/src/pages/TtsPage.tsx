@@ -99,7 +99,7 @@ export default function TtsPage() {
           </select>
         </div>
         <div>
-          <label>语速 ({speed.toFixed(1)}x)</label>
+          <label>语速 ({speed.toFixed(1)}x) · 仅一次性合成生效</label>
           <input
             type="range"
             min={0.5}
@@ -112,7 +112,7 @@ export default function TtsPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 12 }}>
+      <div className="tts-actions">
         <button className="primary" onClick={onSynthFile} disabled={busy || !text.trim()}>
           一次性合成
         </button>

@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     agent_max_turns: int = 8
     agent_temperature: float = 0.7
     agent_max_tokens: int = 1024
+    # 思考模式开关 (Qwen3 系列等混合推理模型): 语音对话追求低延迟, 默认关闭思考
+    # (enable_thinking=false), 避免首 token 前的长链思考拖慢响应 (实测 qwen3.7-plus
+    # 思考开启首 token ~10s, 关闭后 ~0.6s)。仅对支持该参数的模型生效, 其余模型兼容忽略。
+    agent_enable_thinking: bool = False
+    # 前端可选模型白名单: /ws/chat 的 start 帧 model 字段只接受该列表内的值 (防注入
+    # 未授权/不存在的模型名导致 404)。空列表 = 不允许前端切换, 只用 agent_model。
+    agent_model_allowlist: list[str] = ["qwen-plus", "qwen3.7-plus"]
     # 出网超时 (秒): 首 token 超时单独设, 防远端挂死占连接。
     agent_timeout: float = 60.0
     agent_connect_timeout: float = 10.0

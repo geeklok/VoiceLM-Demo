@@ -80,6 +80,12 @@ button.ghost {
 button.rec { border-color: #f87171; color: #f87171; }
 button.rec.active { background: #f87171; color: #0f172a; }
 
+/* 合成按钮行: 两个按钮等高对齐。primary 无边框 + 有 margin-top, ghost 有 1px 边框,
+   直接并排会错位/差 2px; 这里统一去掉 margin-top 并给 primary 补等宽透明边框。 */
+.tts-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+.tts-actions button { margin-top: 0; }
+.tts-actions button.primary { border: 1px solid transparent; }
+
 .result {
   margin-top: 18px;
   background: #0f172a;
@@ -173,6 +179,29 @@ audio { width: 100%; margin-top: 16px; }
   font-size: 12px;
 }
 .chat-adv-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.chat-controls {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.chat-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.chat-control select {
+  margin-top: 0;
+  width: auto;
+  padding: 4px 8px;
+}
+.chat-control input[type="checkbox"] { cursor: pointer; }
+.chat-control select:disabled,
+.chat-control input:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .chat-advanced {
   margin-top: 16px;

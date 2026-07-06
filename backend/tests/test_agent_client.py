@@ -76,6 +76,23 @@ def test_configured_requires_url_and_model():
     assert c3.configured is False
 
 
+# ---- _payload ------------------------------------------------------------
+
+def test_payload_enable_thinking_default_false():
+    # 语音场景默认关思考 (低延迟); payload 顶层带 enable_thinking=false。
+    c = AgentClient(_settings())
+    p = c._payload([{"role": "user", "content": "hi"}])
+    assert p["enable_thinking"] is False
+    assert p["model"] == "gpt-4o"
+    assert p["stream"] is True
+
+
+def test_payload_enable_thinking_configurable():
+    c = AgentClient(_settings(agent_enable_thinking=True))
+    p = c._payload([{"role": "user", "content": "hi"}])
+    assert p["enable_thinking"] is True
+
+
 # ---- _parse_sse_line -----------------------------------------------------
 
 def test_parse_sse_line_variants():

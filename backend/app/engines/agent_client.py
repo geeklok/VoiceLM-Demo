@@ -75,17 +75,40 @@ class AgentClient:
             h["Authorization"] = f"Bearer {self._s.agent_api_key}"
         return h
 
-    def _payload(self, messages: list[dict]) -> dict:
+    def _payload(
+        self,
+        messages: list[dict],
+        *,
+        model: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
+    ) -> dict:
         return {
-            "model": self._s.agent_model,
+            "model": model or self._s.agent_model,
             "messages": messages,
             "stream": True,
             "temperature": self._s.agent_temperature,
             "max_tokens": self._s.agent_max_tokens,
+            # 混合推理模型 (Qwen3 系列) 的思考开关; 语音场景默认关以降首 token 延迟。
+            # 顶层字段 (非 extra_body): DashScope/百炼兼容模式实测仅顶层生效; 不支持
+            # 该参数的模型 (如 qwen-plus) 会兼容忽略。None 时回退全局默认。
+            "enable_thinking": (
+                self._s.agent_enable_thinking
+                if enable_thinking is None
+                else bool(enable_thinking)
+            ),
         }
 
-    async def stream_chat(self, messages: list[dict]) -> AsyncIterator[str]:
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        *,
+        model: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
+    ) -> AsyncIterator[str]:
         """流式对话: POST 远端, 逐行解析 SSE, yield 非空 content 增量。
+
+        model / enable_thinking 为逐连接覆盖 (None=用全局默认); 单例 client 无状态,
+        并发连接各传各的, 互不串扰。
 
         SSE 约定: 每条事件以 'data: ' 开头; 'data: [DONE]' 表示结束;
         其余为 JSON, 取 choices[0].delta.content (缺字段安全跳过)。
@@ -104,7 +127,8 @@ class AgentClient:
         await self._sem.acquire()
         try:
             async with client.stream(
-                "POST", self._url, headers=self._headers(), json=self._payload(messages)
+                "POST", self._url, headers=self._headers(),
+                json=self._payload(messages, model=model, enable_thinking=enable_thinking),
             ) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "ignore")[:500]

@@ -153,6 +153,8 @@ export interface ChatStartOptions {
   voice?: string;
   speed?: number;
   bargeIn?: boolean;
+  model?: string;
+  enableThinking?: boolean;
 }
 
 export interface ChatHandlers {
@@ -184,6 +186,8 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
         voice: opts.voice || undefined,
         speed: opts.speed,
         barge_in: opts.bargeIn,
+        model: opts.model || undefined,
+        enable_thinking: opts.enableThinking,
       })
     );
   ws.onmessage = (ev) => {

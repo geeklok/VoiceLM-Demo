@@ -29,9 +29,10 @@ export default function ChatPage() {
   const [error, setError] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [speed, setSpeed] = useState(1.0);
   const [bargeIn, setBargeIn] = useState(false);
   const [vadGate, setVadGate] = useState(true);
+  const [model, setModel] = useState("qwen3.7-plus");
+  const [enableThinking, setEnableThinking] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
@@ -71,7 +72,7 @@ export default function ChatPage() {
     playerRef.current = player;
 
     const ws = openChatStream(
-      { sampleRate: TARGET_SR, language: "auto", systemPrompt, speed, bargeIn },
+      { sampleRate: TARGET_SR, language: "auto", systemPrompt, bargeIn, model, enableThinking },
       {
         onReady: (n) => {
           setNode(n);
@@ -185,6 +186,29 @@ export default function ChatPage() {
         </button>
       </div>
 
+      <div className="chat-controls">
+        <label className="chat-control">
+          <span>对话模型</span>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            disabled={connected}
+          >
+            <option value="qwen-plus">qwen-plus (低延迟基线)</option>
+            <option value="qwen3.7-plus">qwen3.7-plus (质量更优)</option>
+          </select>
+        </label>
+        <label className="chat-control">
+          <input
+            type="checkbox"
+            checked={enableThinking}
+            onChange={(e) => setEnableThinking(e.target.checked)}
+            disabled={connected}
+          />
+          <span>思考模式 (仅混合推理模型生效, 首字延迟更高)</span>
+        </label>
+      </div>
+
       {showAdvanced && !connected && (
         <div className="chat-advanced">
           <label>系统人设 (可选, 留空用后端默认)</label>
@@ -192,16 +216,6 @@ export default function ChatPage() {
             value={systemPrompt}
             placeholder="例如: 你是一个友好的语音助手，用简短口语化的中文回答。"
             onChange={(e) => setSystemPrompt(e.target.value)}
-          />
-          <label>语速 ({speed.toFixed(1)}x)</label>
-          <input
-            type="range"
-            min={0.5}
-            max={2}
-            step={0.1}
-            value={speed}
-            onChange={(e) => setSpeed(parseFloat(e.target.value))}
-            style={{ width: "100%" }}
           />
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input

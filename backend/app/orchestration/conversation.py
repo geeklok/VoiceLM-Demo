@@ -58,6 +58,9 @@ class ConversationOrchestrator:
         self._asr_model: Optional[str] = settings.agent_asr_model or None
         self._voice = settings.agent_tts_voice
         self._speed = settings.agent_tts_speed
+        # Agent 模型 / 思考模式: 连接级, 首帧 start 可覆盖 (None=用 AgentClient 全局默认)。
+        self._agent_model: Optional[str] = None
+        self._agent_thinking: Optional[bool] = None
 
     @property
     def _node(self) -> str:
@@ -96,6 +99,13 @@ class ConversationOrchestrator:
             # barge-in: 前端可显式选择开/关, 覆盖 env 默认; 未传则用 settings 默认。
             if "barge_in" in start:
                 self._barge_on = bool(start["barge_in"])
+            # Agent 模型: 仅接受白名单内的值 (防注入未授权/不存在模型名致 404)。
+            m = start.get("model")
+            if m and m in self._s.agent_model_allowlist:
+                self._agent_model = str(m)
+            # 思考模式: 前端可显式开/关, 覆盖 env 默认; 未传则用 AgentClient 全局默认。
+            if "enable_thinking" in start:
+                self._agent_thinking = bool(start["enable_thinking"])
 
         reader = asyncio.create_task(self._read_loop(ws))
         await self._safe_send(ws, {"type": "ready", "node": self._node})
@@ -252,7 +262,11 @@ class ConversationOrchestrator:
             return False
 
         watcher: Optional[asyncio.Task] = None
-        agen = self._agent.stream_chat(self._messages).__aiter__()
+        agen = self._agent.stream_chat(
+            self._messages,
+            model=self._agent_model,
+            enable_thinking=self._agent_thinking,
+        ).__aiter__()
         try:
             # 首 token 单独超时, 防远端挂死。
             try:

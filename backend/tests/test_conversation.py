@@ -17,13 +17,17 @@ class _FakeAgent:
     def __init__(self, tokens: list[str]) -> None:
         self._tokens = tokens
         self.seen_messages: list[dict] | None = None
+        self.seen_model: str | None = None
+        self.seen_thinking: bool | None = None
 
     @property
     def configured(self) -> bool:
         return True
 
-    async def stream_chat(self, messages):
+    async def stream_chat(self, messages, *, model=None, enable_thinking=None):
         self.seen_messages = list(messages)
+        self.seen_model = model
+        self.seen_thinking = enable_thinking
         for tok in self._tokens:
             yield tok
 
@@ -217,8 +221,10 @@ def test_truncate_keeps_system_and_recent_turns():
 class _SlowAgent(_FakeAgent):
     """按 token 逐个产出, 每个之间 sleep, 给 barge watcher 留出触发窗口。"""
 
-    async def stream_chat(self, messages):
+    async def stream_chat(self, messages, *, model=None, enable_thinking=None):
         self.seen_messages = list(messages)
+        self.seen_model = model
+        self.seen_thinking = enable_thinking
         for tok in self._tokens:
             await asyncio.sleep(0.03)
             yield tok
@@ -320,6 +326,45 @@ def test_start_frame_barge_in_overrides_settings():
     )
     asyncio.run(asyncio.wait_for(orch_off.run(ws_off), timeout=5.0))
     assert orch_off._barge_on is False
+
+
+def test_start_frame_model_and_thinking_override():
+    # 前端 start 帧传合法 model + enable_thinking, 透传给 stream_chat。
+    disp = _FakeDispatcher(final_text="讲个笑话")
+    agent = _FakeAgent(tokens=["好", "的"])
+    s = _settings()
+    s.agent_model_allowlist = ["qwen-plus", "qwen3.7-plus"]
+    ws = _FakeWS(
+        {
+            "type": "start", "sample_rate": 16000, "channels": 1,
+            "model": "qwen3.7-plus", "enable_thinking": True,
+        },
+        np.zeros(160, dtype=np.float32).tobytes(),
+    )
+    orch = ConversationOrchestrator(disp, agent, s)
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+    assert agent.seen_model == "qwen3.7-plus"
+    assert agent.seen_thinking is True
+
+
+def test_start_frame_model_not_in_allowlist_ignored():
+    # 不在白名单的 model 被忽略 (防注入未授权模型名), 回退全局默认 (None)。
+    disp = _FakeDispatcher(final_text="讲个笑话")
+    agent = _FakeAgent(tokens=["好", "的"])
+    s = _settings()
+    s.agent_model_allowlist = ["qwen-plus"]
+    ws = _FakeWS(
+        {
+            "type": "start", "sample_rate": 16000, "channels": 1,
+            "model": "evil-model",
+        },
+        np.zeros(160, dtype=np.float32).tobytes(),
+    )
+    orch = ConversationOrchestrator(disp, agent, s)
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+    assert agent.seen_model is None
+    # 未传 enable_thinking -> None (回退 AgentClient 全局默认)
+    assert agent.seen_thinking is None
 
 
 def test_real_char_count_ignores_punct_and_space():
