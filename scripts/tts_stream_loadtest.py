@@ -14,16 +14,16 @@ WS 协议 (见 backend/app/api/routes_tts.py):
 服务端真实 baseline 仍以 Prometheus 的 tts_ttfb_seconds 为准 (网络无关)。
 
 用法:
-  # 打公网 LB (默认), 让请求在两机间分流
-  python scripts/tts_stream_loadtest.py --url wss://your-server.example.com/ws/tts \
+  # 打公网 LB, 让请求在多节点间分流
+  python scripts/tts_stream_loadtest.py --url wss://your-domain.example.com/ws/tts \
       --concurrency 4 --total 80 --warmup 4
 
-  # 只压某台机器内网 (在该机本地跑, 排除 LB 与公网抖动)
+  # 默认只压本机后端 (排除 LB 与公网抖动)
   python scripts/tts_stream_loadtest.py --url ws://127.0.0.1:8000/ws/tts \
       --concurrency 2 --total 40
 
 参数:
-  --url          WS 端点 (默认 wss://your-server.example.com/ws/tts)
+  --url          WS 端点 (默认 ws://127.0.0.1:8000/ws/tts)
   --concurrency  并发 worker 数 (默认 4)
   --total        总请求数 (默认 80)
   --warmup       预热请求数, 不计入统计 (默认 4)
@@ -267,7 +267,7 @@ def _report(results: list[Result], wall: float, args) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="流式 TTS 压测填充 TTFB baseline")
-    p.add_argument("--url", default="wss://your-server.example.com/ws/tts")
+    p.add_argument("--url", default="ws://127.0.0.1:8000/ws/tts")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--total", type=int, default=80)
     p.add_argument("--warmup", type=int, default=4)

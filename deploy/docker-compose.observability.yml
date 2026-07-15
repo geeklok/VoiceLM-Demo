@@ -3,7 +3,7 @@
 #
 # 安全: 9090/3000 只绑 127.0.0.1, 不进公网安全组 (与 backend 8000 同原则)。
 #       本机访问: 直接 localhost; 远程访问: SSH 端口转发
-#         ssh -i key.pem -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 root@<入口机IP>
+#         ssh -i ~/.ssh/your_key.pem -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 root@your-server.example.com
 #
 # 用法 (在入口机仓库根 deploy/ 下, 主栈已 up 后):
 #   docker compose -f docker-compose.observability.yml up -d

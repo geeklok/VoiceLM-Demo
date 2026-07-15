@@ -12,7 +12,7 @@ from app.engines.agent_client import AgentClient, AgentError
 def _settings(**over) -> Settings:
     base = dict(
         agent_endpoint="https://api.example.com/v1",
-        agent_api_key="sk-test",
+        agent_api_key="test-api-key",
         agent_model="gpt-4o",
         agent_concurrency=2,
         agent_first_token_timeout=5.0,
@@ -111,7 +111,7 @@ def test_parse_sse_line_variants():
 
 def test_stream_chat_yields_content_in_order():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] == "Bearer sk-test"
+        assert request.headers["Authorization"] == "Bearer test-api-key"
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["model"] == "gpt-4o"

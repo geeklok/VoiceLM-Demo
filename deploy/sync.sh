@@ -20,7 +20,7 @@
 #   DEPLOY_PATH   可选  远端仓库根 (默认 /opt/asr)
 #
 # 为免每次手敲, 可把这些写进 deploy/sync.env (已 gitignore, 不进版本库):
-#   DEPLOY_HOST=1.2.3.4
+#   DEPLOY_HOST=your-server.example.com
 #   DEPLOY_KEY=~/.ssh/your_key.pem
 # 脚本启动时若存在该文件会自动 source。也可用 DEPLOY_ENV_FILE 指定其他路径。
 set -euo pipefail
@@ -54,7 +54,7 @@ if [ -z "$DEPLOY_KEY" ]; then
 fi
 if [ "$_missing" -ne 0 ]; then
   echo "提示: 可一次性传入, 例如:" >&2
-  echo "  DEPLOY_HOST=1.2.3.4 DEPLOY_KEY=~/path/to/key.pem deploy/sync.sh" >&2
+  echo "  DEPLOY_HOST=your-server.example.com DEPLOY_KEY=~/.ssh/your_key.pem deploy/sync.sh" >&2
   echo "或写入 ${_ENV_FILE} (已 gitignore) 后直接运行 deploy/sync.sh" >&2
   exit 2
 fi

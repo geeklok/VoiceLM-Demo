@@ -1,5 +1,6 @@
 # Prometheus 抓取配置 (Phase 3 §7.3)。仅监控网络内可达, 不对公网开放。
-# 入口机上运行: 经 docker DNS 抓本机 backend:8000/metrics; 经 VPC 内网抓 node2。
+# 与应用容器同机运行: 经 docker DNS 抓本机 backend:8000/metrics。
+# 多节点部署时, 可在 static_configs 下追加自己的私有 backend 节点。
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -8,14 +9,14 @@ scrape_configs:
   - job_name: asr-backend
     metrics_path: /metrics
     static_configs:
-      # node1 (入口机本机 backend): 与 nginx 同一 docker 网络, 用服务名解析。
+      # 本机 backend: 与 nginx 同一 docker 网络, 用服务名解析。
       - targets: ["backend:8000"]
         labels:
-          node: node1
-      # node2 (扩展机 backend-only): VPC 内网直达, 由其 override 发布到 10.0.0.12:8000。
-      - targets: ["10.0.0.12:8000"]
-        labels:
-          node: node2
+          node: primary
+      # 示例: 追加扩展机 backend-only 节点 (请替换为自己的私有主机/IP, 不要暴露公网)。
+      # - targets: ["<PRIVATE_BACKEND_HOST>:8000"]
+      #   labels:
+      #     node: node2
 
   - job_name: prometheus
     static_configs:

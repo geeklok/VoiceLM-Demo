@@ -18,7 +18,7 @@ uvicorn app.main:app --reload --port 8000
 
 ## 本地测试真实模型（macOS CPU/MPS）
 
-一键脚本在 `scripts/`，完整步骤见 [本地真实模型测试指南](../.trae/documents/本地真实模型测试指南.md)：
+一键脚本在 `scripts/`，完整步骤见 [本地真实模型测试指南](../docs/getting-started/local-models.md)：
 
 ```bash
 # ASR (FunASR / SenseVoice)
@@ -48,7 +48,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ## 运行测试
 
 ```bash
-cd backend && pytest
+cd backend && ASR_ENGINE=stub TTS_ENGINE=stub CHAT_ENABLED=false pytest
 ```
 
 ## 配置

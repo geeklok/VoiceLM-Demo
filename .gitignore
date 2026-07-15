@@ -24,6 +24,7 @@ smoke_tts_out.wav
 # Env
 .env
 .DS_Store
+.trae/
 
 # Deploy (secrets + mounted data; keep .example)
 deploy/.env.deploy
