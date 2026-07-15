@@ -44,6 +44,23 @@ def test_models(client):
     assert len(body["tts"]) == 1
 
 
+def test_tn_categories(client):
+    r = client.get("/api/v1/tn-categories")
+    assert r.status_code == 200
+    body = r.json()
+    # 与后端 DOMAIN_TN_CATEGORIES 单一事实来源一致 (前端不再硬编码)。
+    from app.utils.domain_tn import DOMAIN_TN_CATEGORIES
+
+    assert len(body) == len(DOMAIN_TN_CATEGORIES)
+    by_id = {c["id"]: c for c in body}
+    for key, (impl, label) in DOMAIN_TN_CATEGORIES.items():
+        assert by_id[key]["impl"] is impl
+        assert by_id[key]["label"] == label
+    # 已实现类别至少含新转正的 datetime/finance/abbrev。
+    impl_ids = {c["id"] for c in body if c["impl"]}
+    assert {"datetime", "finance", "abbrev"} <= impl_ids
+
+
 def test_asr_file_stub(client):
     files = {"file": ("test.wav", _wav_bytes(), "audio/wav")}
     r = client.post("/api/v1/asr", files=files, data={"language": "zh"})

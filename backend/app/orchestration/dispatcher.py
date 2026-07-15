@@ -19,6 +19,7 @@ from app.orchestration.limiter import ConcurrencyLimitError, GpuLimiter
 from app.schemas.models import ASRResponse, ASRSegment
 from app.utils.logging import get_logger
 from app.utils.text_clean import strip_markdown
+from app.utils.domain_tn import apply_default_tts_tn, apply_domain_tn
 from app.utils.text_split import split_sentences
 
 logger = get_logger(__name__)
@@ -155,11 +156,14 @@ class Dispatcher:
                 yield partial
 
     async def tts_file(
-        self, text: str, voice: str, speed: float, model: Optional[str] = None
+        self, text: str, voice: str, speed: float, model: Optional[str] = None,
+        domain_tn: Optional[list[str]] = None,
     ) -> tuple[np.ndarray, int, dict]:
         engine = self._registry.tts(model)
         sr = engine.output_sample_rate
         text = strip_markdown(text)
+        text = apply_domain_tn(text, domain_tn)
+        text = apply_default_tts_tn(text)
         try:
             async with self._limiter.tts_slot():
                 t0 = time.perf_counter()
@@ -186,7 +190,8 @@ class Dispatcher:
         return pcm, sr, qos
 
     async def tts_stream(
-        self, text: str, voice: str, speed: float, model: Optional[str] = None
+        self, text: str, voice: str, speed: float, model: Optional[str] = None,
+        domain_tn: Optional[list[str]] = None,
     ) -> tuple[AsyncIterator[np.ndarray], int, dict, dict]:
         """返回 (音频块流, 采样率, meta, qos_holder)。
 
@@ -202,6 +207,8 @@ class Dispatcher:
         async def guarded() -> AsyncIterator[np.ndarray]:
             try:
                 clean = strip_markdown(text)
+                clean = apply_domain_tn(clean, domain_tn)
+                clean = apply_default_tts_tn(clean)
                 if self._tts_sentence_stream:
                     sentences = split_sentences(
                         clean,

@@ -86,6 +86,71 @@ button.rec.active { background: #f87171; color: #0f172a; }
 .tts-actions button { margin-top: 0; }
 .tts-actions button.primary { border: 1px solid transparent; }
 
+/* 领域 TN 多选网格 */
+.tn-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 14px 0 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.tn-caret {
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 0.15s;
+  color: var(--muted);
+}
+.tn-caret.open { transform: rotate(90deg); }
+.tn-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.tn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.tn-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.tn-item input[type="checkbox"] { cursor: pointer; }
+.tn-item.experimental { color: var(--muted); border-style: dashed; }
+.tn-item.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: rgba(15, 23, 42, 0.35);
+}
+.tn-item.disabled input[type="checkbox"] { cursor: not-allowed; }
+.tn-tag {
+  margin-left: auto;
+  font-size: 11px;
+  color: #f59e0b;
+  border: 1px solid #f59e0b;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .result {
   margin-top: 18px;
   background: #0f172a;

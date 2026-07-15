@@ -28,6 +28,8 @@ class TTSRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     format: str = Field(default="wav", pattern="^(wav)$")
     model: Optional[str] = None
+    # 领域 TN 预处理类别 (前端多选); 送模型内置 TN 前按类做归一化。空/None=不做。
+    domain_tn: Optional[list[str]] = None
 
 
 class ModelInfo(BaseModel):
@@ -48,3 +50,12 @@ class ModelsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     ready: bool
+
+
+class TnCategory(BaseModel):
+    """领域 TN 类别 (单条)。前端据此动态渲染多选框, 避免前后端手写双维护。"""
+
+    id: str
+    label: str
+    # 是否已真正实现 (规则可做对); False = 实验性·暂未生效 (noop 透传)。
+    impl: bool

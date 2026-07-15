@@ -208,6 +208,18 @@ def test_tts_stream_single_call_when_disabled():
     assert qos.get("model") == "fake-tts"
 
 
+def test_tts_stream_applies_default_bare_number_tn():
+    eng = _FakeTTS()
+    disp = Dispatcher(
+        _TTSRegistry(eng), GpuLimiter(), CircuitBreaker(),
+        tts_sentence_stream=False,
+    )
+    total, qos = asyncio.run(_drain_stream(disp, "1234"))
+    assert eng.calls == ["一千二百三十四"]
+    assert total == len(eng.calls[0])
+    assert qos.get("model") == "fake-tts"
+
+
 def test_tts_stream_merges_short_segments_when_min_chars_set():
     eng = _FakeTTS()
     disp = Dispatcher(

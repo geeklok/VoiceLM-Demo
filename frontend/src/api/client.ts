@@ -44,6 +44,13 @@ export interface ModelsResponse {
   tts: ModelInfo[];
 }
 
+// 领域 TN 类别 (后端 domain_tn.py 单一事实来源, 前端动态拉取渲染)。
+export interface TnCategory {
+  id: string;
+  label: string;
+  impl: boolean;
+}
+
 function wsBase(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}`;
@@ -52,6 +59,12 @@ function wsBase(): string {
 export async function fetchModels(): Promise<ModelsResponse> {
   const r = await fetch("/api/v1/models");
   if (!r.ok) throw new Error(`models ${r.status}`);
+  return r.json();
+}
+
+export async function fetchTnCategories(): Promise<TnCategory[]> {
+  const r = await fetch("/api/v1/tn-categories");
+  if (!r.ok) throw new Error(`tn-categories ${r.status}`);
   return r.json();
 }
 
@@ -86,12 +99,19 @@ export async function asrFile(
 export async function ttsFile(
   text: string,
   voice: string,
-  speed: number
+  speed: number,
+  domainTn?: string[]
 ): Promise<TtsFileResult> {
   const r = await fetch("/api/v1/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice, speed, format: "wav" }),
+    body: JSON.stringify({
+      text,
+      voice,
+      speed,
+      format: "wav",
+      domain_tn: domainTn && domainTn.length ? domainTn : undefined,
+    }),
   });
   if (!r.ok) throw new Error(`tts ${r.status}`);
   const num = (h: string): number | null => {
@@ -237,11 +257,21 @@ export function openTtsStream(
   onMeta: (sampleRate: number, node?: string, model?: string) => void,
   onChunk: (pcm: Int16Array) => void,
   onDone: (qos?: TtsQos) => void,
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  domainTn?: string[]
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/tts`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "synthesize", text, voice, speed }));
+  ws.onopen = () =>
+    ws.send(
+      JSON.stringify({
+        type: "synthesize",
+        text,
+        voice,
+        speed,
+        domain_tn: domainTn && domainTn.length ? domainTn : undefined,
+      })
+    );
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       const msg = JSON.parse(ev.data);

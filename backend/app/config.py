@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     # 零样本参考音色: 音色名 -> 参考音频 + 文本
     cosyvoice_voices: dict[str, VoiceRef] = {}
     # 默认音色名 (须存在于 cosyvoice_voices)
-    cosyvoice_default_voice: str = "default"
+    cosyvoice_default_voice: str = "中文女"
 
     # ---- 分句流式 TTS (Phase 3 §7 B 线 TTFB 优化) ----
     # 开启后: 长文本按标点分句, 在同一 TTS 信号量内逐句流式合成,
@@ -148,7 +148,7 @@ class Settings(BaseSettings):
     # 出网并发上限 (非 GPU): 限制同时挂在远端 Agent 的请求数。
     agent_concurrency: int = 4
     # 聊天回复音色 / 语速 (复用 CosyVoice 音色)。
-    agent_tts_voice: str = "default"
+    agent_tts_voice: str = "中文女"
     agent_tts_speed: float = 1.0
     # 聊天用 ASR 模型 name (留空=默认 ASR, 线上即 funasr-streaming 真流式)。
     agent_asr_model: str = ""
