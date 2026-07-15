@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatQos, openChatStream } from "../api/client";
+import { ChatQos, fetchModels, openChatStream } from "../api/client";
 import { MicRecorder, TARGET_SR } from "../audio/recorder";
 import { StreamingPcmPlayer } from "../audio/player";
 
@@ -19,6 +19,34 @@ const STATE_LABEL: Record<TurnState, string> = {
   responding: "回复中",
 };
 
+interface VoiceOption {
+  value: string;
+  label: string;
+}
+
+const FALLBACK_VOICES: VoiceOption[] = [
+  { value: "中文女", label: "中文女" },
+  { value: "中文男", label: "中文男" },
+];
+
+function voiceLabel(value: string): string {
+  // 线上历史配置可能把女声注册为技术 id "default"，UI 统一展示成「中文女」。
+  return value === "default" ? "中文女" : value;
+}
+
+function buildVoiceOptions(backendVoices: string[]): VoiceOption[] {
+  const options = backendVoices.map((v) => ({
+    value: v,
+    label: voiceLabel(v),
+  }));
+  for (const fallback of FALLBACK_VOICES) {
+    if (!options.some((opt) => opt.label === fallback.label)) {
+      options.push(fallback);
+    }
+  }
+  return options;
+}
+
 export default function ChatPage() {
   const [connected, setConnected] = useState(false);
   const [turnState, setTurnState] = useState<TurnState>("");
@@ -33,6 +61,8 @@ export default function ChatPage() {
   const [vadGate, setVadGate] = useState(true);
   const [model, setModel] = useState("qwen3.7-plus");
   const [enableThinking, setEnableThinking] = useState(false);
+  const [voice, setVoice] = useState(FALLBACK_VOICES[0].value);
+  const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
@@ -47,6 +77,21 @@ export default function ChatPage() {
 
   // 离开页面时收尾
   useEffect(() => () => teardown(), []);
+
+  // 聊天回复复用 TTS 音色列表；后端返回真实注册音色，前端只负责展示友好名称。
+  useEffect(() => {
+    fetchModels()
+      .then((m) => {
+        if (m.tts[0]?.languages?.length) {
+          const options = buildVoiceOptions(m.tts[0].languages);
+          setVoices(options);
+          setVoice((cur) =>
+            options.some((opt) => opt.value === cur) ? cur : options[0].value
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   function teardown() {
     recRef.current?.stop();
@@ -72,7 +117,15 @@ export default function ChatPage() {
     playerRef.current = player;
 
     const ws = openChatStream(
-      { sampleRate: TARGET_SR, language: "auto", systemPrompt, bargeIn, model, enableThinking },
+      {
+        sampleRate: TARGET_SR,
+        language: "auto",
+        systemPrompt,
+        voice,
+        bargeIn,
+        model,
+        enableThinking,
+      },
       {
         onReady: (n) => {
           setNode(n);
@@ -211,6 +264,19 @@ export default function ChatPage() {
 
       {showAdvanced && !connected && (
         <div className="chat-advanced">
+          <label>回复音色</label>
+          <select
+            value={voice}
+            onChange={(e) => setVoice(e.target.value)}
+            disabled={connected}
+          >
+            {voices.map((v) => (
+              <option key={v.value} value={v.value}>
+                {v.label}
+              </option>
+            ))}
+          </select>
+
           <label>系统人设 (可选, 留空用后端默认)</label>
           <textarea
             value={systemPrompt}
