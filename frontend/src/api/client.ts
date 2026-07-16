@@ -44,6 +44,27 @@ export interface ModelsResponse {
   tts: ModelInfo[];
 }
 
+export type ChatMode = "cascade" | "native";
+export type ChatInputFormat = "pcm_f32le" | "pcm_s16le";
+
+export interface ChatModelInfo {
+  name: string;
+  label: string;
+  mode: ChatMode;
+  provider: string;
+  voices: string[];
+  default: boolean;
+  input_format: ChatInputFormat;
+  supports_thinking: boolean;
+  supports_barge_in: boolean;
+  supports_vad_gate: boolean;
+  preserves_paralinguistics: boolean;
+}
+
+export interface ChatModelsResponse {
+  models: ChatModelInfo[];
+}
+
 // 领域 TN 类别 (后端 domain_tn.py 单一事实来源, 前端动态拉取渲染)。
 export interface TnCategory {
   id: string;
@@ -59,6 +80,12 @@ function wsBase(): string {
 export async function fetchModels(): Promise<ModelsResponse> {
   const r = await fetch("/api/v1/models");
   if (!r.ok) throw new Error(`models ${r.status}`);
+  return r.json();
+}
+
+export async function fetchChatModels(): Promise<ChatModelsResponse> {
+  const r = await fetch("/api/v1/chat/models");
+  if (!r.ok) throw new Error(`chat models ${r.status}`);
   return r.json();
 }
 
@@ -169,6 +196,8 @@ export interface ChatQos {
 export interface ChatStartOptions {
   sampleRate: number;
   language: string;
+  mode: ChatMode;
+  inputFormat: ChatInputFormat;
   systemPrompt?: string;
   voice?: string;
   speed?: number;
@@ -199,8 +228,10 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
     ws.send(
       JSON.stringify({
         type: "start",
+        mode: opts.mode,
         sample_rate: opts.sampleRate,
         channels: 1,
+        input_format: opts.inputFormat,
         language: opts.language,
         system_prompt: opts.systemPrompt || undefined,
         voice: opts.voice || undefined,

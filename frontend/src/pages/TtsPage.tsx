@@ -124,6 +124,7 @@ export default function TtsPage() {
         player.push(pcm);
       },
       (serverQos) => {
+        player.finishTurn();
         setAudioUrl(URL.createObjectURL(player.toWavBlob()));
         if (serverQos) setQos({ ...serverQos, mode: "stream" });
         else if (node) setQos({ node, mode: "stream" });

@@ -18,8 +18,8 @@ function downsample(buffer: Float32Array, srcSr: number, dstSr: number): Float32
 
 /**
  * 麦克风录音 → 16kHz 单声道 float32 PCM 块。
- * MVP 用 ScriptProcessorNode (兼容性最好); 浏览器在浏览器端完成降采样,
- * 减轻后端压力 (见技术方案 5.5)。
+ * 优先用 AudioWorklet 以 20ms 小块采集；旧浏览器回退 ScriptProcessorNode。
+ * 浏览器端完成降采样，减轻后端压力。
  *
  * 可选能量 VAD 门控 (gateVad): 开启后只在"有声"窗口上送 PCM, 静音期不发,
  * 挡掉环境噪声/静音被上送后端误识别 (配合后端有效发言门控双保险)。
@@ -35,6 +35,7 @@ export class MicRecorder {
   private ctx?: AudioContext;
   private stream?: MediaStream;
   private processor?: ScriptProcessorNode;
+  private worklet?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
 
   // 能量 VAD 状态
@@ -66,17 +67,50 @@ export class MicRecorder {
     });
     this.ctx = new AudioContext();
     this.source = this.ctx.createMediaStreamSource(this.stream);
-    this.processor = this.ctx.createScriptProcessor(4096, 1, 1);
     const srcSr = this.ctx.sampleRate;
-    this.processor.onaudioprocess = (e) => {
-      const input = e.inputBuffer.getChannelData(0);
-      const resampled = downsample(new Float32Array(input), srcSr, TARGET_SR);
-      if (!this.gateVad || this.shouldSend(input)) {
-        this.onChunk(resampled);
+    if (this.ctx.audioWorklet) {
+      try {
+        await this.startWorklet(srcSr);
+        return;
+      } catch {
+        // 部分旧浏览器暴露 audioWorklet 但无法加载模块，回退兼容路径。
       }
+    }
+    this.startScriptProcessor(srcSr);
+  }
+
+  private async startWorklet(srcSr: number): Promise<void> {
+    if (!this.ctx || !this.source) return;
+    await this.ctx.audioWorklet.addModule("/pcm-capture-worklet.js");
+    this.worklet = new AudioWorkletNode(this.ctx, "pcm-capture-processor", {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      processorOptions: { frameMs: 20 },
+    });
+    this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
+      this.emitFrame(event.data, srcSr);
+    };
+    this.source.connect(this.worklet);
+  }
+
+  private startScriptProcessor(srcSr: number): void {
+    if (!this.ctx || !this.source) return;
+    this.processor = this.ctx.createScriptProcessor(4096, 1, 1);
+    this.processor.onaudioprocess = (e) => {
+      this.emitFrame(
+        new Float32Array(e.inputBuffer.getChannelData(0)),
+        srcSr
+      );
     };
     this.source.connect(this.processor);
     this.processor.connect(this.ctx.destination);
+  }
+
+  private emitFrame(input: Float32Array, srcSr: number): void {
+    const resampled = downsample(input, srcSr, TARGET_SR);
+    if (!this.gateVad || this.shouldSend(input)) {
+      this.onChunk(resampled);
+    }
   }
 
   /** 能量 VAD 判定 + hangover: 返回本块是否应上送。 */
@@ -101,11 +135,16 @@ export class MicRecorder {
   }
 
   stop(): void {
+    if (this.worklet) {
+      this.worklet.port.onmessage = null;
+      this.worklet.disconnect();
+    }
     this.processor?.disconnect();
     this.source?.disconnect();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close();
     this.processor = undefined;
+    this.worklet = undefined;
     this.source = undefined;
     this.stream = undefined;
     this.ctx = undefined;

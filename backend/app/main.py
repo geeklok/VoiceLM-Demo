@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes_asr, routes_chat, routes_health, routes_tts
 from app.api.middleware import DrainMiddleware
+from app.chat.qwen_realtime import QwenRealtimeProvider
 from app.config import get_settings
 from app.engines.agent_client import AgentClient
 from app.engines.registry import EngineRegistry
@@ -55,6 +56,18 @@ async def lifespan(app: FastAPI):
         logger.info("chat enabled: agent=%s model=%s", settings.agent_endpoint, settings.agent_model)
     else:
         app.state.agent_client = None
+
+    # 原生端到端语音 Provider 使用独立云端并发闸，不占本地 ASR/TTS GPU 槽。
+    qwen_realtime = QwenRealtimeProvider(settings)
+    if settings.chat_enabled and qwen_realtime.configured:
+        app.state.qwen_realtime_provider = qwen_realtime
+        logger.info(
+            "native chat enabled: endpoint=%s model=%s",
+            settings.qwen_omni_endpoint,
+            settings.qwen_omni_model,
+        )
+    else:
+        app.state.qwen_realtime_provider = None
 
     # 后台预热, 不阻塞启动; readyz 在预热完成后转为就绪
     async def _warmup() -> None:

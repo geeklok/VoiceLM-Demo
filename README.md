@@ -8,7 +8,7 @@
 
 - **ASR**：文件转写、WebSocket 实时转写、FunASR/SenseVoice、2-pass 流式修正、热词偏置能力标记。
 - **TTS**：文件式合成、WebSocket 流式合成、CosyVoice2 零样本音色、中文默认数字兜底、领域 TN（Text Normalization）配置。
-- **Chat**：浏览器麦克风 → 流式 ASR → OpenAI-compatible Agent → 流式 TTS，支持高级设置里的回复音色选择。
+- **Chat**：支持级联模式（流式 ASR → OpenAI-compatible Agent → 流式 TTS）和可选的原生端到端语音 Provider，支持动态模型/音色发现与 barge-in。
 - **前端**：React + Vite，ASR/TTS/Chat 三个业务页面，模型发现、音色选择、QoS 信息展示。
 - **工程化**：Docker Compose 部署、Nginx HTTPS 反代、Prometheus/Grafana 可观测性、并发限流、降级熔断、优雅退出。
 
@@ -142,6 +142,9 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observabili
 | `CHAT_ENABLED` | 是否启用语音聊天 | `false` |
 | `AGENT_ENDPOINT` | OpenAI-compatible API base URL | `https://api.openai.com/v1` 或你的兼容服务 |
 | `AGENT_API_KEY` | 远端 Agent API Key | 仅写入本地 `.env` / `deploy/.env.deploy` |
+| `QWEN_OMNI_ENABLED` | 是否启用原生端到端语音模式 | `false` |
+| `QWEN_OMNI_ENDPOINT` | Qwen-Omni-Realtime WebSocket 地址 | `wss://<WorkspaceId>.<region>.maas.aliyuncs.com/api-ws/v1/realtime` |
+| `QWEN_OMNI_SILENCE_MS` | 原生语音服务端 VAD 静音端点 | `2000` |
 
 完整说明见 [docs/configuration.md](docs/configuration.md)。
 
@@ -151,6 +154,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observabili
 - [docs/asr/funasr.md](docs/asr/funasr.md)：ASR / FunASR 方案
 - [docs/tts/cosyvoice2.md](docs/tts/cosyvoice2.md)：TTS / CosyVoice2 方案
 - [docs/chat/speech-to-speech.md](docs/chat/speech-to-speech.md)：语音到语音对话方案
+- [docs/chat/native-speech-upgrade.md](docs/chat/native-speech-upgrade.md)：原生端到端语音升级与 A/B 验收
 - [docs/deployment/public-deploy.md](docs/deployment/public-deploy.md)：公网部署 Runbook
 
 ## 安全与隐私

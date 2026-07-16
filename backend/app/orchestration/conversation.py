@@ -12,6 +12,13 @@ from fastapi.websockets import WebSocketDisconnect
 
 from app.config import Settings
 from app.engines.agent_client import AgentClient, AgentError
+from app.observability.metrics import (
+    observe_chat_playback_dropped_chunks,
+    observe_chat_playback_underrun,
+    observe_chat_provider_error,
+    observe_chat_session,
+    observe_chat_turn,
+)
 from app.orchestration.dispatcher import Dispatcher
 from app.orchestration.limiter import ConcurrencyLimitError
 from app.postprocess.audio_encode import pcm_to_int16_bytes
@@ -61,31 +68,41 @@ class ConversationOrchestrator:
         # Agent 模型 / 思考模式: 连接级, 首帧 start 可覆盖 (None=用 AgentClient 全局默认)。
         self._agent_model: Optional[str] = None
         self._agent_thinking: Optional[bool] = None
+        self._provider = "cascade"
+        self._turn_endpoint_ms: Optional[int] = None
+        self._turn_input_ms: Optional[int] = None
+        self._interrupt_detected_at: Optional[float] = None
 
     @property
     def _node(self) -> str:
         return self._disp.node
 
+    @property
+    def _model_label(self) -> str:
+        return self._agent_model or self._s.agent_model or "unknown"
+
     # ---- 主循环 ----------------------------------------------------------
 
-    async def run(self, ws: WebSocket) -> None:
+    async def run(self, ws: WebSocket, start: Optional[dict] = None) -> None:
         self._pcm_q = asyncio.Queue()
         self._stop = asyncio.Event()
         self._barge_q = asyncio.Queue()
         self._interrupt = asyncio.Event()
         if not self._agent.configured:
+            observe_chat_session(self._provider, self._model_label, "unavailable")
             await self._safe_send(
                 ws, {"type": "error", "code": "unavailable", "message": "语音聊天未启用"}
             )
             await self._safe_close(ws)
             return
 
-        # 首帧: start 配置 (可选; 缺省用默认)
-        try:
-            start = await ws.receive_json()
-        except (WebSocketDisconnect, json.JSONDecodeError):
-            await self._safe_close(ws)
-            return
+        # 路由层可预读首帧用于选择 Provider；直接调用时仍兼容由本类读取。
+        if start is None:
+            try:
+                start = await ws.receive_json()
+            except (WebSocketDisconnect, json.JSONDecodeError):
+                await self._safe_close(ws)
+                return
         if isinstance(start, dict) and start.get("type") == "start":
             self._sample_rate = int(start.get("sample_rate", 16000))
             self._channels = int(start.get("channels", 1))
@@ -109,6 +126,7 @@ class ConversationOrchestrator:
 
         reader = asyncio.create_task(self._read_loop(ws))
         await self._safe_send(ws, {"type": "ready", "node": self._node})
+        session_status = "ok"
         try:
             while not self._stop.is_set():
                 await self._send_state(ws, "listening")
@@ -122,6 +140,7 @@ class ConversationOrchestrator:
         except WebSocketDisconnect:
             logger.info("chat ws disconnected")
         except Exception:  # noqa: BLE001
+            session_status = "error"
             logger.exception("chat orchestrator error")
         finally:
             self._stop.set()
@@ -131,6 +150,7 @@ class ConversationOrchestrator:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             await self._safe_close(ws)
+            observe_chat_session(self._provider, self._model_label, session_status)
 
     # ---- 接收循环 (独立 task, 唯一调用 ws.receive 的地方) -------------------
 
@@ -156,6 +176,17 @@ class ConversationOrchestrator:
                         continue
                     if ctrl.get("type") == "end":
                         break
+                    if ctrl.get("type") == "client_metric":
+                        observe_chat_playback_underrun(
+                            self._provider,
+                            self._model_label,
+                            int(ctrl.get("playback_underruns") or 0),
+                        )
+                        observe_chat_playback_dropped_chunks(
+                            self._provider,
+                            self._model_label,
+                            int(ctrl.get("dropped_chunks") or 0),
+                        )
         except WebSocketDisconnect:
             pass
         finally:
@@ -172,9 +203,10 @@ class ConversationOrchestrator:
         # 累计送入 ASR 的音频样本数, 用于"有效发言"的时长门控 (ASRPartial 不带时长)。
         fed_samples = 0
         sr_seen = self._sample_rate
+        last_chunk_at: Optional[float] = None
 
         async def chunk_iter() -> AsyncIterator[tuple[np.ndarray, int, int]]:
-            nonlocal fed_samples, sr_seen
+            nonlocal fed_samples, sr_seen, last_chunk_at
             while True:
                 item = await self._pcm_q.get()
                 if item is None:  # stop / end 哨兵
@@ -182,6 +214,7 @@ class ConversationOrchestrator:
                 pcm, sr, _ch = item
                 fed_samples += len(pcm)
                 sr_seen = sr or sr_seen
+                last_chunk_at = time.perf_counter()
                 yield item
 
         final_text: Optional[str] = None
@@ -193,6 +226,12 @@ class ConversationOrchestrator:
                     seg_ms = int(fed_samples / sr_seen * 1000) if sr_seen else 0
                     if self._is_valid_speech(partial.text, seg_ms):
                         final_text = partial.text
+                        self._turn_input_ms = seg_ms
+                        self._turn_endpoint_ms = (
+                            int((time.perf_counter() - last_chunk_at) * 1000)
+                            if last_chunk_at is not None
+                            else None
+                        )
                         await self._safe_send(
                             ws, {"type": "user_final", "text": partial.text, "node": self._node}
                         )
@@ -236,15 +275,18 @@ class ConversationOrchestrator:
         buffer = ""
         meta_sent = False
         interrupted = False
+        output_samples = 0
+        output_sample_rate = 0
 
         async def speak(sentence: str) -> bool:
             """合成并下发一句; 返回 True 表示中途被打断 (barge-in)。"""
-            nonlocal meta_sent, tts_ttfb_ms
+            nonlocal meta_sent, output_sample_rate, output_samples, tts_ttfb_ms
             if not sentence.strip():
                 return False
             stream, sr, meta, _qos = await self._disp.tts_stream(
                 sentence, self._voice, self._speed, None
             )
+            output_sample_rate = sr
             if not meta_sent:
                 await self._safe_send(
                     ws,
@@ -258,6 +300,7 @@ class ConversationOrchestrator:
                     return True
                 if tts_ttfb_ms is None:
                     tts_ttfb_ms = int((time.perf_counter() - t_start) * 1000)
+                output_samples += len(pcm_chunk)
                 await ws.send_bytes(pcm_to_int16_bytes(pcm_chunk))
             return False
 
@@ -320,6 +363,20 @@ class ConversationOrchestrator:
                         interrupted = await speak(assistant_full)
         except (AgentError, ConcurrencyLimitError) as exc:
             code = "busy" if isinstance(exc, ConcurrencyLimitError) else "agent"
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            observe_chat_provider_error(
+                self._provider, self._model_label, code
+            )
+            observe_chat_turn(
+                self._provider,
+                self._model_label,
+                status=code,
+                endpoint_ms=self._turn_endpoint_ms,
+                first_audio_ms=tts_ttfb_ms,
+                total_ms=total_ms,
+                input_audio_ms=self._turn_input_ms,
+                output_audio_ms=_audio_ms(output_samples, output_sample_rate),
+            )
             await self._safe_send(
                 ws, {"type": "error", "code": code, "message": str(exc)}
             )
@@ -343,11 +400,38 @@ class ConversationOrchestrator:
 
         if interrupted:
             # 打断: 通知前端停播 + 清字幕, 直接回 LISTENING 接住用户新话 (不发 assistant_done)。
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            interrupt_ms = (
+                int((time.perf_counter() - self._interrupt_detected_at) * 1000)
+                if self._interrupt_detected_at is not None
+                else None
+            )
+            observe_chat_turn(
+                self._provider,
+                self._model_label,
+                status="interrupted",
+                endpoint_ms=self._turn_endpoint_ms,
+                first_audio_ms=tts_ttfb_ms,
+                total_ms=total_ms,
+                input_audio_ms=self._turn_input_ms,
+                output_audio_ms=_audio_ms(output_samples, output_sample_rate),
+                interrupt_ms=interrupt_ms,
+            )
             await self._safe_send(ws, {"type": "interrupted", "node": self._node})
             self._state = "listening"
             return
 
         total_ms = int((time.perf_counter() - t_start) * 1000)
+        observe_chat_turn(
+            self._provider,
+            self._model_label,
+            status="ok",
+            endpoint_ms=self._turn_endpoint_ms,
+            first_audio_ms=tts_ttfb_ms,
+            total_ms=total_ms,
+            input_audio_ms=self._turn_input_ms,
+            output_audio_ms=_audio_ms(output_samples, output_sample_rate),
+        )
         await self._safe_send(
             ws,
             {
@@ -385,6 +469,7 @@ class ConversationOrchestrator:
             ):
                 text = (partial.text or "")
                 if _real_char_count(text) >= self._s.chat_barge_in_min_chars:
+                    self._interrupt_detected_at = time.perf_counter()
                     self._interrupt.set()
                     return
         except (ConcurrencyLimitError, Exception):  # noqa: BLE001
@@ -468,3 +553,9 @@ def _real_char_count(text: str) -> int:
             continue
         n += 1
     return n
+
+
+def _audio_ms(samples: int, sample_rate: int) -> Optional[int]:
+    if samples <= 0 or sample_rate <= 0:
+        return None
+    return int(samples / sample_rate * 1000)

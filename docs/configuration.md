@@ -48,6 +48,21 @@ COSYVOICE_VOICES='{"中文女":{"audio_path":"/voices/default.wav","prompt_text"
 - `AGENT_TTS_VOICE` / `AGENT_TTS_SPEED`：聊天回复默认音色和语速。
 - `AGENT_ASR_MODEL`：聊天使用的 ASR 模型；留空使用默认 ASR。
 
+### 原生端到端语音
+
+- `QWEN_OMNI_ENABLED`：是否在 Chat 页暴露原生语音模式。
+- `QWEN_OMNI_ENDPOINT`：百炼 Workspace 专属 WebSocket 地址，不含 `model` 查询参数。
+- `QWEN_OMNI_API_KEY`：百炼 API Key，只写本地或部署环境。
+- `QWEN_OMNI_MODEL` / `QWEN_OMNI_MODEL_ALLOWLIST`：默认模型和前端可选白名单。
+- `QWEN_OMNI_VOICES` / `QWEN_OMNI_DEFAULT_VOICE`：前端可选音色及默认音色。
+- `QWEN_OMNI_CONCURRENCY`：云端原生语音会话并发上限，独立于本地 GPU 信号量。
+- `QWEN_OMNI_TURN_DETECTION`：`semantic_vad` 或 `server_vad`。
+- `QWEN_OMNI_VAD_THRESHOLD` / `QWEN_OMNI_SILENCE_MS`：服务端 VAD 灵敏度与静音端点时长。
+
+原生模式必须持续上传音频，前端会自动关闭本地能量 VAD，避免丢失停顿、笑声等副语言信息。输入为 16 kHz PCM，输出为 24 kHz PCM。
+
+配置完整并启用后，前端 Chat 页会默认优先选择原生语音模式；未配置时只展示级联模式。`QWEN_OMNI_SILENCE_MS` 默认 2000 ms，主要用于避免句中自然停顿被服务端 VAD 过早切开。
+
 ## 部署与安全
 
 - `NODE_NAME`：节点名，会随响应返回给前端和监控，用于多节点观察。

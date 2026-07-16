@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatQos, fetchModels, openChatStream } from "../api/client";
+import {
+  ChatMode,
+  ChatModelInfo,
+  ChatQos,
+  fetchChatModels,
+  openChatStream,
+} from "../api/client";
 import { MicRecorder, TARGET_SR } from "../audio/recorder";
 import { StreamingPcmPlayer } from "../audio/player";
 
@@ -24,27 +30,16 @@ interface VoiceOption {
   label: string;
 }
 
-const FALLBACK_VOICES: VoiceOption[] = [
-  { value: "中文女", label: "中文女" },
-  { value: "中文男", label: "中文男" },
-];
-
 function voiceLabel(value: string): string {
   // 线上历史配置可能把女声注册为技术 id "default"，UI 统一展示成「中文女」。
   return value === "default" ? "中文女" : value;
 }
 
 function buildVoiceOptions(backendVoices: string[]): VoiceOption[] {
-  const options = backendVoices.map((v) => ({
+  return backendVoices.map((v) => ({
     value: v,
     label: voiceLabel(v),
   }));
-  for (const fallback of FALLBACK_VOICES) {
-    if (!options.some((opt) => opt.label === fallback.label)) {
-      options.push(fallback);
-    }
-  }
-  return options;
 }
 
 export default function ChatPage() {
@@ -59,10 +54,12 @@ export default function ChatPage() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [bargeIn, setBargeIn] = useState(false);
   const [vadGate, setVadGate] = useState(true);
-  const [model, setModel] = useState("qwen3.7-plus");
+  const [mode, setMode] = useState<ChatMode>("cascade");
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<ChatModelInfo[]>([]);
   const [enableThinking, setEnableThinking] = useState(false);
-  const [voice, setVoice] = useState(FALLBACK_VOICES[0].value);
-  const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
+  const [voice, setVoice] = useState("");
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
@@ -78,20 +75,60 @@ export default function ChatPage() {
   // 离开页面时收尾
   useEffect(() => () => teardown(), []);
 
-  // 聊天回复复用 TTS 音色列表；后端返回真实注册音色，前端只负责展示友好名称。
+  // 后端按实际 Provider 配置下发模式、模型、音色与能力，前端不硬编码模型名。
   useEffect(() => {
-    fetchModels()
-      .then((m) => {
-        if (m.tts[0]?.languages?.length) {
-          const options = buildVoiceOptions(m.tts[0].languages);
-          setVoices(options);
-          setVoice((cur) =>
-            options.some((opt) => opt.value === cur) ? cur : options[0].value
-          );
+    fetchChatModels()
+      .then(({ models: available }) => {
+        setModels(available);
+        const selected =
+          available.find((item) => item.default && item.mode === "native") ||
+          available.find((item) => item.mode === "native") ||
+          available.find((item) => item.default) ||
+          available[0];
+        if (selected) {
+          applyModel(selected, available);
+        } else {
+          setError("语音聊天未启用");
         }
       })
-      .catch(() => {});
+      .catch((err) => setError("加载对话模型失败: " + String(err)));
   }, []);
+
+  const selectedModel = models.find(
+    (item) => item.mode === mode && item.name === model
+  );
+  const modeOptions = Array.from(new Set(models.map((item) => item.mode)));
+
+  function applyModel(selected: ChatModelInfo, available = models) {
+    setMode(selected.mode);
+    setModel(selected.name);
+    const options = buildVoiceOptions(selected.voices);
+    setVoices(options);
+    setVoice((cur) =>
+      options.some((opt) => opt.value === cur) ? cur : options[0]?.value || ""
+    );
+    if (!selected.supports_thinking) setEnableThinking(false);
+    if (selected.mode === "native") setBargeIn(true);
+    else if (!selected.supports_barge_in) setBargeIn(false);
+    if (!selected.supports_vad_gate) setVadGate(false);
+    if (!available.some((item) => item.name === selected.name)) {
+      setModels(available);
+    }
+  }
+
+  function selectMode(nextMode: ChatMode) {
+    const selected =
+      models.find((item) => item.mode === nextMode && item.default) ||
+      models.find((item) => item.mode === nextMode);
+    if (selected) applyModel(selected);
+  }
+
+  function selectModel(name: string) {
+    const selected = models.find(
+      (item) => item.mode === mode && item.name === name
+    );
+    if (selected) applyModel(selected);
+  }
 
   function teardown() {
     recRef.current?.stop();
@@ -112,14 +149,24 @@ export default function ChatPage() {
     setUserPartial("");
     setAssistantPartial("");
     setTurnState("");
+    if (!selectedModel) {
+      setError("没有可用的对话模型");
+      return;
+    }
 
-    const player = new StreamingPcmPlayer();
+    const player = new StreamingPcmPlayer({
+      initialBufferMs: 100,
+      maxBufferedMs: 120000,
+      retainAudio: false,
+    });
     playerRef.current = player;
 
     const ws = openChatStream(
       {
         sampleRate: TARGET_SR,
         language: "auto",
+        mode,
+        inputFormat: selectedModel.input_format,
         systemPrompt,
         voice,
         bargeIn,
@@ -145,6 +192,7 @@ export default function ChatPage() {
         onTtsMeta: (sr) => player.setSampleRate(sr),
         onAudio: (pcm) => player.push(pcm),
         onAssistantDone: (t, qos, n) => {
+          player.finishTurn();
           setAssistantPartial("");
           if (t.trim()) setMessages((m) => [...m, { role: "assistant", text: t, qos, node: n }]);
         },
@@ -174,9 +222,14 @@ export default function ChatPage() {
   async function startMic(ws: WebSocket) {
     const rec = new MicRecorder(
       (pcm) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const payload =
+          selectedModel?.input_format === "pcm_s16le"
+            ? floatToInt16(pcm)
+            : pcm;
+        ws.send(payload.buffer);
       },
-      { gateVad: vadGate }
+      { gateVad: selectedModel?.supports_vad_gate ? vadGate : false }
     );
     recRef.current = rec;
     try {
@@ -190,13 +243,24 @@ export default function ChatPage() {
   function stop() {
     recRef.current?.stop();
     recRef.current = null;
+    const ws = wsRef.current;
+    const stats = playerRef.current?.getStats();
     try {
-      wsRef.current?.send(JSON.stringify({ type: "end" }));
+      if (ws?.readyState === WebSocket.OPEN && stats) {
+        ws.send(
+          JSON.stringify({
+            type: "client_metric",
+            playback_underruns: stats.playbackUnderruns,
+            dropped_chunks: stats.droppedChunks,
+          })
+        );
+      }
+      ws?.send(JSON.stringify({ type: "end" }));
     } catch {
       /* ignore */
     }
     try {
-      wsRef.current?.close();
+      ws?.close();
     } catch {
       /* ignore */
     }
@@ -241,14 +305,33 @@ export default function ChatPage() {
 
       <div className="chat-controls">
         <label className="chat-control">
+          <span>对话模式</span>
+          <select
+            value={mode}
+            onChange={(e) => selectMode(e.target.value as ChatMode)}
+            disabled={connected || modeOptions.length < 2}
+          >
+            {modeOptions.map((item) => (
+              <option key={item} value={item}>
+                {item === "native" ? "原生语音" : "级联"}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="chat-control">
           <span>对话模型</span>
           <select
             value={model}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => selectModel(e.target.value)}
             disabled={connected}
           >
-            <option value="qwen-plus">qwen-plus (低延迟基线)</option>
-            <option value="qwen3.7-plus">qwen3.7-plus (质量更优)</option>
+            {models
+              .filter((item) => item.mode === mode)
+              .map((item) => (
+                <option key={`${item.mode}:${item.name}`} value={item.name}>
+                  {item.label}
+                </option>
+              ))}
           </select>
         </label>
         <label className="chat-control">
@@ -256,10 +339,13 @@ export default function ChatPage() {
             type="checkbox"
             checked={enableThinking}
             onChange={(e) => setEnableThinking(e.target.checked)}
-            disabled={connected}
+            disabled={connected || !selectedModel?.supports_thinking}
           />
           <span>思考模式 (仅混合推理模型生效, 首字延迟更高)</span>
         </label>
+        {selectedModel?.preserves_paralinguistics && (
+          <span className="chat-capability">保留语气、停顿和非语言声</span>
+        )}
       </div>
 
       {showAdvanced && !connected && (
@@ -268,7 +354,7 @@ export default function ChatPage() {
           <select
             value={voice}
             onChange={(e) => setVoice(e.target.value)}
-            disabled={connected}
+            disabled={connected || voices.length === 0}
           >
             {voices.map((v) => (
               <option key={v.value} value={v.value}>
@@ -288,16 +374,20 @@ export default function ChatPage() {
               type="checkbox"
               checked={vadGate}
               onChange={(e) => setVadGate(e.target.checked)}
+              disabled={!selectedModel?.supports_vad_gate}
             />
-            静音门控 (VAD)：仅在检测到说话时上送，过滤环境噪声
+            静音门控 (VAD)：级联模式过滤环境噪声；原生语音模式强制关闭
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
               checked={bargeIn}
               onChange={(e) => setBargeIn(e.target.checked)}
+              disabled={
+                !selectedModel?.supports_barge_in || selectedModel?.mode === "native"
+              }
             />
-            说话打断 (barge-in)：AI 回答时可插话打断，建议戴耳机
+            说话打断 (barge-in)：原生模式始终开启，建议戴耳机
           </label>
         </div>
       )}
@@ -330,6 +420,15 @@ export default function ChatPage() {
       </div>
     </div>
   );
+}
+
+function floatToInt16(pcm: Float32Array): Int16Array {
+  const out = new Int16Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) {
+    const sample = Math.max(-1, Math.min(1, pcm[i]));
+    out[i] = sample < 0 ? sample * 32768 : sample * 32767;
+  }
+  return out;
 }
 
 function ChatBubble({ msg }: { msg: ChatMessage }) {

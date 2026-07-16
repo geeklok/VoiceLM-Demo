@@ -167,6 +167,32 @@ class Settings(BaseSettings):
     # 该段语音累计时长下限 (毫秒; <该值视为瞬时噪声脉冲)。
     chat_min_speech_ms: int = 300
 
+    # ---- 原生端到端语音 Provider (Qwen-Omni-Realtime) ----
+    # 独立开关; 关闭或配置不完整时不向前端暴露 native 模式。
+    qwen_omni_enabled: bool = False
+    # 百炼 Workspace 专属 WebSocket 地址，不含 model 查询参数。
+    qwen_omni_endpoint: str = ""
+    qwen_omni_api_key: str = ""
+    qwen_omni_model: str = "qwen3.5-omni-flash-realtime"
+    qwen_omni_model_allowlist: list[str] = [
+        "qwen3.5-omni-flash-realtime",
+        "qwen3.5-omni-plus-realtime",
+    ]
+    # 前端可选音色白名单。不同账号/模型开放范围可能不同，部署时按控制台配置。
+    qwen_omni_voices: list[str] = ["Tina"]
+    qwen_omni_default_voice: str = "Tina"
+    qwen_omni_system_prompt: str = (
+        "你是一个友好的语音助手，用简短、自然、口语化的中文回答。"
+    )
+    qwen_omni_temperature: float = 0.7
+    qwen_omni_max_tokens: int = 1024
+    qwen_omni_concurrency: int = 4
+    qwen_omni_connect_timeout: float = 10.0
+    qwen_omni_turn_detection: Literal["server_vad", "semantic_vad"] = "semantic_vad"
+    qwen_omni_vad_threshold: float = 0.5
+    qwen_omni_silence_ms: int = 2000
+    qwen_omni_input_transcription: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

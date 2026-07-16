@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,24 @@ class ModelInfo(BaseModel):
 class ModelsResponse(BaseModel):
     asr: list[ModelInfo] = Field(default_factory=list)
     tts: list[ModelInfo] = Field(default_factory=list)
+
+
+class ChatModelInfo(BaseModel):
+    name: str
+    label: str
+    mode: Literal["cascade", "native"]
+    provider: str
+    voices: list[str] = Field(default_factory=list)
+    default: bool = False
+    input_format: Literal["pcm_f32le", "pcm_s16le"] = "pcm_f32le"
+    supports_thinking: bool = False
+    supports_barge_in: bool = True
+    supports_vad_gate: bool = True
+    preserves_paralinguistics: bool = False
+
+
+class ChatModelsResponse(BaseModel):
+    models: list[ChatModelInfo] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

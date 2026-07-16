@@ -492,3 +492,31 @@ barge-in 不改变聊天的部署拓扑：`/ws/chat` 已是 node1+node2 双机 L
 - **node1**（<NODE_PUBLIC_HOST>）：docker cp 增量部署 `funasr_engine.py`+`config.py`，重启 backend healthy，`funasr_drop_nonspeech_events=True` 生效。取证探针验证后已全部撤除，容器代码 md5 与本地干净版一致。
 - 三轮真机取证结论：① 孤立咳嗽（`嗯哼`2字，`<|Cough|>`）→ 事件标签层可拦；② 孤立咳嗽（空/单字）→ 字数门控兜住；③ 咳嗽+说话连读（VAD 未断句）→ 合成 `<|Speech|>哼今天天气不错`，按正常发言通过（合理）。所有孤立咳嗽均未触发对话，正常说话正常触发。
 - **node2 同步**（2026-07-05）：事件标签层已按 §13 overlay/docker cp 增量方式同步至 node2（<NODE_PUBLIC_HOST>），两机容器 `funasr_engine.py`+`config.py` md5 逐字节一致（`89c949…`/`be057c…`），`funasr_drop_nonspeech_events=True` 双机生效。**双机防护完全对齐**：LB 命中任一节点，咳嗽等非语言声均走三层防护（事件标签层 → 字数门控 → 时长门控）。
+
+## 15. 原生端到端语音模式（2026-07-16）
+
+> 为降低级联链路延迟并保留语气、停顿、笑声等副语言信息，`/ws/chat` 新增原生语音 Provider。现有级联链路继续保留，作为稳定可控基线。
+
+### 设计
+
+- `/ws/chat` 首帧新增 `mode`：`cascade` 走现有 ASR→Agent→TTS，`native` 走 Qwen-Omni-Realtime；未传时仍默认为 `cascade` 兼容旧客户端。
+- 前端通过 `GET /api/v1/chat/models` 动态发现可用模式、模型、音色和能力。若后端已配置原生模型，新版前端默认选中「原生语音」；未配置时自动回退级联。
+- 原生 Provider 在后端保存 API Key 并代理到厂商 WebSocket，浏览器不直连厂商服务，不暴露密钥。
+- 原生 Provider 有独立并发闸，不占本地 ASR/TTS GPU 信号量。
+
+### 音频链路
+
+- 原生模式持续上传 20 ms PCM 音频块，强制关闭前端能量 VAD，避免本地门控丢失停顿、笑声、呼吸等副语言信息。
+- 采集优先使用 `AudioWorklet`，旧浏览器回退 `ScriptProcessorNode`。
+- 播放端使用 100 ms 启动缓冲和 120 秒安全队列上限。此前 2 秒队列上限会在原生模型快速返回长回复音频时丢弃后续块，表现为“文本继续输出但音频只播前一两句”，已修复。
+- 浏览器播放欠载和队列丢块会作为客户端指标回传到后端 Prometheus。
+
+### VAD 与打断
+
+- `QWEN_OMNI_TURN_DETECTION` 默认 `semantic_vad`。
+- `QWEN_OMNI_SILENCE_MS` 默认 2000 ms，用于降低句中自然停顿被服务端 VAD 切断的概率；如需更快端点，可在 1200-2000 ms 间灰度。
+- 原生模式下 barge-in 始终可用，建议戴耳机降低回声触发打断的概率。
+
+### 配置与验收
+
+配置项见《[配置说明](../configuration.md)》的「原生端到端语音」章节；A/B 脚本、指标和灰度门槛见《[原生端到端语音对话升级方案](native-speech-upgrade.md)》。

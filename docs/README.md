@@ -23,6 +23,7 @@
 ## 语音聊天
 
 - [语音到语音对话方案](chat/speech-to-speech.md)
+- [原生端到端语音对话升级与 A/B 验收](chat/native-speech-upgrade.md)
 
 ## 部署与运维
 

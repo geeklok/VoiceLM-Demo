@@ -267,6 +267,14 @@ audio { width: 100%; margin-top: 16px; }
 .chat-control input[type="checkbox"] { cursor: pointer; }
 .chat-control select:disabled,
 .chat-control input:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-capability {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+}
 
 .chat-advanced {
   margin-top: 16px;

@@ -44,6 +44,12 @@ def test_models(client):
     assert len(body["tts"]) == 1
 
 
+def test_chat_models_empty_when_chat_disabled(client):
+    r = client.get("/api/v1/chat/models")
+    assert r.status_code == 200
+    assert r.json() == {"models": []}
+
+
 def test_tn_categories(client):
     r = client.get("/api/v1/tn-categories")
     assert r.status_code == 200

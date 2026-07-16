@@ -1,0 +1,32 @@
+[
+  {
+    "id": "neutral_short",
+    "path": "recordings/neutral-short.wav",
+    "tags": ["neutral", "short"]
+  },
+  {
+    "id": "hesitation_pause",
+    "path": "recordings/hesitation-pause.wav",
+    "tags": ["hesitation", "pause"]
+  },
+  {
+    "id": "laughter_then_speech",
+    "path": "recordings/laughter-then-speech.wav",
+    "tags": ["laughter", "paralinguistic"]
+  },
+  {
+    "id": "low_volume",
+    "path": "recordings/low-volume.wav",
+    "tags": ["low-volume", "robustness"]
+  },
+  {
+    "id": "emotional",
+    "path": "recordings/emotional.wav",
+    "tags": ["emotion", "prosody"]
+  },
+  {
+    "id": "business_tool_request",
+    "path": "recordings/business-tool-request.wav",
+    "tags": ["task", "business"]
+  }
+]

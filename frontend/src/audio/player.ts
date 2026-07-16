@@ -1,13 +1,36 @@
-/** 将流式 Int16 PCM 块累积并用 Web Audio 播放, 同时收集为可下载 WAV。 */
+export interface StreamingPcmPlayerOptions {
+  initialBufferMs?: number;
+  maxBufferedMs?: number;
+  retainAudio?: boolean;
+}
+
+export interface StreamingPcmPlayerStats {
+  playbackUnderruns: number;
+  droppedChunks: number;
+}
+
+/** 有界抖动缓冲的流式 Int16 PCM 播放器。 */
 export class StreamingPcmPlayer {
   private ctx: AudioContext;
   private sampleRate = 24000;
   private nextTime = 0;
   private chunks: Int16Array[] = [];
+  private pending: Int16Array[] = [];
+  private pendingMs = 0;
   private sources: Set<AudioBufferSourceNode> = new Set();
+  private started = false;
+  private turnComplete = false;
+  private playbackUnderruns = 0;
+  private droppedChunks = 0;
+  private initialBufferMs: number;
+  private maxBufferedMs: number;
+  private retainAudio: boolean;
 
-  constructor() {
+  constructor(opts: StreamingPcmPlayerOptions = {}) {
     this.ctx = new AudioContext();
+    this.initialBufferMs = opts.initialBufferMs ?? 100;
+    this.maxBufferedMs = opts.maxBufferedMs ?? 120000;
+    this.retainAudio = opts.retainAudio ?? true;
   }
 
   setSampleRate(sr: number): void {
@@ -15,7 +38,50 @@ export class StreamingPcmPlayer {
   }
 
   push(pcm16: Int16Array): void {
-    this.chunks.push(pcm16);
+    if (!pcm16.length) return;
+    // 上一回合已标记完成但排队音频尚未播完时，新音频代表下一回合。
+    if (this.turnComplete) this.turnComplete = false;
+    if (this.retainAudio) this.chunks.push(pcm16.slice());
+    if (!this.started) {
+      this.pending.push(pcm16);
+      this.pendingMs += this.durationMs(pcm16);
+      if (this.pendingMs >= this.initialBufferMs) this.flush();
+      return;
+    }
+    this.schedule(pcm16);
+  }
+
+  /** 回复完成时放行不足启动水位的尾部音频。 */
+  finishTurn(): void {
+    this.flush();
+    this.turnComplete = true;
+    this.resetTurnIfDrained();
+  }
+
+  flush(): void {
+    if (!this.pending.length) return;
+    if (!this.started) {
+      this.started = true;
+      this.nextTime = this.ctx.currentTime + 0.02;
+    }
+    const pending = this.pending;
+    this.pending = [];
+    this.pendingMs = 0;
+    for (const chunk of pending) this.schedule(chunk);
+  }
+
+  private schedule(pcm16: Int16Array): void {
+    const now = this.ctx.currentTime;
+    const durationMs = this.durationMs(pcm16);
+    const bufferedMs = Math.max(0, this.nextTime - now) * 1000;
+    if (bufferedMs + durationMs > this.maxBufferedMs) {
+      this.droppedChunks += 1;
+      return;
+    }
+    if (this.nextTime > 0 && this.nextTime < now - 0.02) {
+      this.playbackUnderruns += 1;
+      this.nextTime = now;
+    }
     const f32 = new Float32Array(pcm16.length);
     for (let i = 0; i < pcm16.length; i++) f32[i] = pcm16[i] / 32768;
     const buf = this.ctx.createBuffer(1, f32.length, this.sampleRate);
@@ -23,13 +89,15 @@ export class StreamingPcmPlayer {
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.ctx.destination);
-    const now = this.ctx.currentTime;
     const start = Math.max(now, this.nextTime);
     src.start(start);
     this.nextTime = start + buf.duration;
     // 保留引用以便 barge-in 打断时停掉所有已排队 source。
     this.sources.add(src);
-    src.onended = () => this.sources.delete(src);
+    src.onended = () => {
+      this.sources.delete(src);
+      this.resetTurnIfDrained();
+    };
   }
 
   /** barge-in 打断: 立即停掉所有已排队/在播的音频, 复位播放游标。 */
@@ -43,7 +111,19 @@ export class StreamingPcmPlayer {
       }
     }
     this.sources.clear();
+    this.pending = [];
+    this.pendingMs = 0;
     this.nextTime = 0;
+    this.started = false;
+    this.turnComplete = false;
+    if (!this.retainAudio) this.chunks = [];
+  }
+
+  getStats(): StreamingPcmPlayerStats {
+    return {
+      playbackUnderruns: this.playbackUnderruns,
+      droppedChunks: this.droppedChunks,
+    };
   }
 
   /** 合并所有块为 WAV Blob, 供下载。 */
@@ -59,7 +139,19 @@ export class StreamingPcmPlayer {
   }
 
   close(): void {
+    this.stop();
     this.ctx.close();
+  }
+
+  private durationMs(pcm16: Int16Array): number {
+    return pcm16.length / this.sampleRate * 1000;
+  }
+
+  private resetTurnIfDrained(): void {
+    if (!this.turnComplete || this.sources.size || this.pending.length) return;
+    this.nextTime = 0;
+    this.started = false;
+    this.turnComplete = false;
   }
 }
 
