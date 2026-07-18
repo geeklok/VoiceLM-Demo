@@ -520,3 +520,42 @@ barge-in 不改变聊天的部署拓扑：`/ws/chat` 已是 node1+node2 双机 L
 ### 配置与验收
 
 配置项见《[配置说明](../configuration.md)》的「原生端到端语音」章节；A/B 脚本、指标和灰度门槛见《[原生端到端语音对话升级方案](native-speech-upgrade.md)》。
+
+## 16. 停止语义、Provider 默认值与连接恢复（2026-07-18）
+
+本节为当前实现，覆盖 §12 中“只在 RESPONDING 阶段由说话触发打断”的早期语义。
+
+### 统一取消协议
+
+前端在 THINKING 或 RESPONDING 状态显示“停止当前回复”，上行：
+
+```json
+{"type":"cancel_response"}
+```
+
+- **级联模式**：等待 Agent 首 token 的 task 与取消事件并行；用户可在“思考中”停止，无需等待远端先返回。RESPONDING 时关闭当前 TTS 异步流和 Agent SSE。
+- **原生模式**：立即停浏览器播放器，同时向厂商上游发送 `response.cancel`。上游已结束或断开时按幂等取消处理，不把取消失败升级成会话故障。
+- 两种模式都下发 `{"type":"interrupted","text":"...","node":"..."}`，不再发送本轮 `assistant_done`，状态回到 listening。
+- 级联模式被打断时，只把已经完整流式下发的句子写入多轮历史；模型生成但用户没有听到的后续文本不会进入上下文。该规则优先于 §12 早期“写回全部 `assistant_full`”的描述。
+
+### Provider 能力目录
+
+`GET /api/v1/chat/models` 除模型、音色和输入格式外，还返回：
+
+| 字段 | 含义 |
+| --- | --- |
+| `default_barge_in` | Provider 推荐的说话打断默认值 |
+| `default_vad_gate` | Provider 推荐的前端能量 VAD 默认值 |
+| `default_capture_profile` | `natural` 或 `noise_reduction` |
+| `vad_silence_ms_options` | 可选服务端端点档位 |
+| `default_vad_silence_ms` | 推荐端点静音时长 |
+
+前端切换模式/模型时完整应用这组默认值。原生模式推荐自然采音、关闭本地门控和开启打断；级联模式推荐嘈杂环境采音和本地 VAD。高级设置仍允许用户按场景调整支持的选项。
+
+### 连接与播放
+
+- Chat 使用 `idle -> connecting -> connected` 状态机，10 秒建连超时；只有收到 `ready` 后才打开麦克风。
+- 非预期 WebSocket 关闭会停止麦克风、播放器并恢复 UI，不会永久停在“已连接/忙碌”状态。
+- 播放欠载和丢块指标在每个 `assistant_done` / `interrupted` 回合上报并清零，不再只在整场会话结束时累计上报。
+- native 不可用且目录中存在 cascade Provider 时，错误区提供“切换到级联模式”入口；不会在同一连接内自动迁移上下文。
+- `chat_sessions_total{status="disconnected"}` 区分异常断线；主动或说话打断继续记录为 `chat_turns_total{status="interrupted"}`。

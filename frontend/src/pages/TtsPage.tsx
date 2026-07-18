@@ -15,36 +15,22 @@ interface VoiceOption {
   label: string;
 }
 
-const FALLBACK_VOICES: VoiceOption[] = [
-  { value: "中文女", label: "中文女" },
-  { value: "中文男", label: "中文男" },
-];
-
 function voiceLabel(value: string): string {
   // 后端真实 CosyVoice 零样本音色常以技术 id "default" 注册；UI 不直接暴露该实现名。
   return value === "default" ? "中文女" : value;
 }
 
 function buildVoiceOptions(backendVoices: string[]): VoiceOption[] {
-  const options = backendVoices.map((v) => ({
+  return backendVoices.map((v) => ({
     value: v,
     label: voiceLabel(v),
   }));
-  // 线上历史配置可能只注册了技术音色 id "default"。这时仍保留产品侧固定的
-  // 「中文女 / 中文男」两个入口，避免模型发现返回单个技术 id 后把「中文男」挤掉。
-  // 若后端已真实注册同名音色，则按后端返回为准；这里只补缺失的展示项。
-  for (const fallback of FALLBACK_VOICES) {
-    if (!options.some((opt) => opt.label === fallback.label)) {
-      options.push(fallback);
-    }
-  }
-  return options;
 }
 
 export default function TtsPage() {
   const [text, setText] = useState("你好，欢迎使用语音大模型合成服务。");
-  const [voice, setVoice] = useState(FALLBACK_VOICES[0].value);
-  const [voices, setVoices] = useState<VoiceOption[]>(FALLBACK_VOICES);
+  const [voice, setVoice] = useState("");
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
   const [speed, setSpeed] = useState(1.0);
   const [tnOptions, setTnOptions] = useState<TnCategory[]>([]);
   const [domainTn, setDomainTn] = useState<string[]>([]);
@@ -55,6 +41,9 @@ export default function TtsPage() {
   const [error, setError] = useState("");
   const [qos, setQos] = useState<TtsQos | null>(null);
   const playerRef = useRef<StreamingPcmPlayer | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const audioUrlRef = useRef("");
 
   useEffect(() => {
     fetchModels()
@@ -67,7 +56,7 @@ export default function TtsPage() {
           );
         }
       })
-      .catch(() => {});
+      .catch((err) => setError("加载 TTS 音色失败: " + String(err)));
     // 领域 TN 类别由后端单一维护 (domain_tn.py), 前端动态拉取, 不再硬编码 impl。
     fetchTnCategories()
       .then((opts) => {
@@ -78,15 +67,31 @@ export default function TtsPage() {
       .catch(() => {});
   }, []);
 
+  useEffect(
+    () => () => {
+      cancelRequestedRef.current = true;
+      wsRef.current?.close();
+      playerRef.current?.close();
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    },
+    []
+  );
+
+  function replaceAudioUrl(next: string) {
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioUrlRef.current = next;
+    setAudioUrl(next);
+  }
+
   async function onSynthFile() {
     setBusy(true);
     setError("");
     setStatus("合成中...");
-    setAudioUrl("");
+    replaceAudioUrl("");
     setQos(null);
     try {
       const { blob, qos } = await ttsFile(text, voice, speed, domainTn);
-      setAudioUrl(URL.createObjectURL(blob));
+      replaceAudioUrl(URL.createObjectURL(blob));
       setQos({ ...qos, mode: "file" });
       setStatus("合成完成");
     } catch (err) {
@@ -101,14 +106,16 @@ export default function TtsPage() {
     setBusy(true);
     setError("");
     setStatus("流式合成中 (边合成边播)...");
-    setAudioUrl("");
+    replaceAudioUrl("");
     setQos(null);
+    cancelRequestedRef.current = false;
+    playerRef.current?.close();
     const player = new StreamingPcmPlayer();
     playerRef.current = player;
     const t0 = performance.now();
     let firstChunk = true;
     let node: string | undefined;
-    openTtsStream(
+    const ws = openTtsStream(
       text,
       voice,
       speed,
@@ -125,7 +132,7 @@ export default function TtsPage() {
       },
       (serverQos) => {
         player.finishTurn();
-        setAudioUrl(URL.createObjectURL(player.toWavBlob()));
+        replaceAudioUrl(URL.createObjectURL(player.toWavBlob()));
         if (serverQos) setQos({ ...serverQos, mode: "stream" });
         else if (node) setQos({ node, mode: "stream" });
         setBusy(false);
@@ -134,8 +141,28 @@ export default function TtsPage() {
         setError(msg);
         setBusy(false);
       },
+      (expected) => {
+        if (wsRef.current !== ws) return;
+        wsRef.current = null;
+        if (!expected && !cancelRequestedRef.current) {
+          setError((cur) => cur || "TTS 连接已断开，请重试");
+          setStatus("");
+        }
+        setBusy(false);
+      },
       domainTn
     );
+    wsRef.current = ws;
+  }
+
+  function stopStream() {
+    cancelRequestedRef.current = true;
+    wsRef.current?.close();
+    wsRef.current = null;
+    playerRef.current?.close();
+    playerRef.current = null;
+    setBusy(false);
+    setStatus("已停止流式合成");
   }
 
   function toggleTn(id: string) {
@@ -150,6 +177,7 @@ export default function TtsPage() {
     <div className="panel">
       <label>合成文本</label>
       <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={5000} />
+      <div className="meta">{text.length} / 5000 字符</div>
 
       <div className="row">
         <div>
@@ -213,13 +241,24 @@ export default function TtsPage() {
         </>
       )}
 
+      {domainTn.includes("finance") && domainTn.includes("digit_string") && (
+        <div className="inline-warning">
+          「金融金额」与「号码逐位读」语义冲突，金额中的数字可能被逐位朗读，建议只保留一项。
+        </div>
+      )}
+
       <div className="tts-actions">
-        <button className="primary" onClick={onSynthFile} disabled={busy || !text.trim()}>
+        <button className="primary" onClick={onSynthFile} disabled={busy || !text.trim() || !voice}>
           一次性合成
         </button>
-        <button className="ghost" onClick={onSynthStream} disabled={busy || !text.trim()}>
+        <button className="ghost" onClick={onSynthStream} disabled={busy || !text.trim() || !voice}>
           流式合成
         </button>
+        {busy && wsRef.current && (
+          <button className="ghost rec" onClick={stopStream}>
+            停止合成
+          </button>
+        )}
       </div>
 
       {error && <div className="result" style={{ color: "#f87171" }}>{error}</div>}

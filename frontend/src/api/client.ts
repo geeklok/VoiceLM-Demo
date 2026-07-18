@@ -59,7 +59,14 @@ export interface ChatModelInfo {
   supports_barge_in: boolean;
   supports_vad_gate: boolean;
   preserves_paralinguistics: boolean;
+  default_barge_in: boolean;
+  default_vad_gate: boolean;
+  default_capture_profile: CaptureProfile;
+  vad_silence_ms_options: number[];
+  default_vad_silence_ms?: number | null;
 }
+
+export type CaptureProfile = "natural" | "noise_reduction";
 
 export interface ChatModelsResponse {
   models: ChatModelInfo[];
@@ -75,6 +82,25 @@ export interface TnCategory {
 function wsBase(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}`;
+}
+
+async function responseError(r: Response, fallback: string): Promise<Error> {
+  const body = await r.json().catch(() => ({}));
+  return new Error(body.detail || `${fallback} ${r.status}`);
+}
+
+function armWebSocket(
+  ws: WebSocket,
+  onTimeout: () => void,
+  timeoutMs = 10000
+): () => void {
+  const timer = window.setTimeout(() => {
+    if (ws.readyState === WebSocket.CONNECTING) {
+      onTimeout();
+      ws.close();
+    }
+  }, timeoutMs);
+  return () => window.clearTimeout(timer);
 }
 
 export async function fetchModels(): Promise<ModelsResponse> {
@@ -116,10 +142,7 @@ export async function asrFile(
   if (hotwords) fd.append("hotwords", hotwords);
   if (model) fd.append("model", model);
   const r = await fetch("/api/v1/asr", { method: "POST", body: fd });
-  if (!r.ok) {
-    const detail = await r.json().catch(() => ({}));
-    throw new Error(detail.detail || `asr ${r.status}`);
-  }
+  if (!r.ok) throw await responseError(r, "asr");
   return r.json();
 }
 
@@ -140,7 +163,7 @@ export async function ttsFile(
       domain_tn: domainTn && domainTn.length ? domainTn : undefined,
     }),
   });
-  if (!r.ok) throw new Error(`tts ${r.status}`);
+  if (!r.ok) throw await responseError(r, "tts");
   const num = (h: string): number | null => {
     const v = r.headers.get(h);
     return v === null || v === "" ? null : Number(v);
@@ -155,17 +178,33 @@ export async function ttsFile(
   return { blob: await r.blob(), qos };
 }
 
+export interface AsrStreamHandlers {
+  onReady: (node?: string, model?: string) => void;
+  onPartial: (
+    text: string,
+    isFinal: boolean,
+    segmentId: number,
+    node?: string
+  ) => void;
+  onError: (message: string, code?: string, retryAfter?: number) => void;
+  onClose: (expected: boolean) => void;
+}
+
 export function openAsrStream(
   sampleRate: number,
   language: string,
-  onPartial: (text: string, isFinal: boolean, segmentId: number, node?: string) => void,
-  onError: (msg: string) => void,
+  handlers: AsrStreamHandlers,
   model?: string,
   hotwords?: string
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/asr`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () =>
+  let expectedClose = false;
+  const clearTimeout = armWebSocket(ws, () =>
+    handlers.onError("连接 ASR 服务超时", "timeout")
+  );
+  ws.onopen = () => {
+    clearTimeout();
     ws.send(
       JSON.stringify({
         type: "start",
@@ -176,13 +215,28 @@ export function openAsrStream(
         hotwords: hotwords || undefined,
       })
     );
-  ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-    if (msg.type === "partial") onPartial(msg.text, false, msg.segment_id ?? 0, msg.node);
-    else if (msg.type === "final") onPartial(msg.text, true, msg.segment_id ?? 0, msg.node);
-    else if (msg.type === "error") onError(msg.message);
   };
-  ws.onerror = () => onError("WebSocket 错误");
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "ready") handlers.onReady(msg.node, msg.model);
+      else if (msg.type === "partial")
+        handlers.onPartial(msg.text, false, msg.segment_id ?? 0, msg.node);
+      else if (msg.type === "final")
+        handlers.onPartial(msg.text, true, msg.segment_id ?? 0, msg.node);
+      else if (msg.type === "error") {
+        expectedClose = true;
+        handlers.onError(msg.message, msg.code, msg.retry_after);
+      }
+    } catch {
+      handlers.onError("ASR 服务返回了无法解析的消息", "protocol");
+    }
+  };
+  ws.onerror = () => handlers.onError("ASR WebSocket 错误", "ws");
+  ws.onclose = () => {
+    clearTimeout();
+    handlers.onClose(expectedClose);
+  };
   return ws;
 }
 
@@ -204,6 +258,7 @@ export interface ChatStartOptions {
   bargeIn?: boolean;
   model?: string;
   enableThinking?: boolean;
+  vadSilenceMs?: number;
 }
 
 export interface ChatHandlers {
@@ -215,8 +270,9 @@ export interface ChatHandlers {
   onTtsMeta?: (sampleRate: number, node?: string, model?: string) => void;
   onAudio?: (pcm: Int16Array) => void;
   onAssistantDone?: (text: string, qos?: ChatQos, node?: string) => void;
-  onInterrupted?: (node?: string) => void;
+  onInterrupted?: (text?: string, node?: string) => void;
   onError?: (code: string, message: string) => void;
+  onClose?: (expected: boolean) => void;
 }
 
 // 语音对话 (speech-to-speech): 上行 start 帧 + float32 16k PCM; 下行 ready/state/
@@ -224,7 +280,12 @@ export interface ChatHandlers {
 export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/chat`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () =>
+  let expectedClose = false;
+  const clearTimeout = armWebSocket(ws, () =>
+    h.onError?.("timeout", "连接语音聊天服务超时")
+  );
+  ws.onopen = () => {
+    clearTimeout();
     ws.send(
       JSON.stringify({
         type: "start",
@@ -239,14 +300,22 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
         barge_in: opts.bargeIn,
         model: opts.model || undefined,
         enable_thinking: opts.enableThinking,
+        vad_silence_ms: opts.vadSilenceMs,
       })
     );
+  };
   ws.onmessage = (ev) => {
     if (typeof ev.data !== "string") {
       h.onAudio?.(new Int16Array(ev.data as ArrayBuffer));
       return;
     }
-    const msg = JSON.parse(ev.data);
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      h.onError?.("protocol", "语音聊天服务返回了无法解析的消息");
+      return;
+    }
     switch (msg.type) {
       case "ready":
         h.onReady?.(msg.node);
@@ -270,14 +339,19 @@ export function openChatStream(opts: ChatStartOptions, h: ChatHandlers): WebSock
         h.onAssistantDone?.(msg.text, msg.qos, msg.node);
         break;
       case "interrupted":
-        h.onInterrupted?.(msg.node);
+        h.onInterrupted?.(msg.text, msg.node);
         break;
       case "error":
+        expectedClose = true;
         h.onError?.(msg.code || "error", msg.message || "未知错误");
         break;
     }
   };
   ws.onerror = () => h.onError?.("ws", "WebSocket 错误");
+  ws.onclose = () => {
+    clearTimeout();
+    h.onClose?.(expectedClose);
+  };
   return ws;
 }
 
@@ -289,11 +363,17 @@ export function openTtsStream(
   onChunk: (pcm: Int16Array) => void,
   onDone: (qos?: TtsQos) => void,
   onError: (msg: string) => void,
+  onClose: (expected: boolean) => void,
   domainTn?: string[]
 ): WebSocket {
   const ws = new WebSocket(`${wsBase()}/ws/tts`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () =>
+  let expectedClose = false;
+  const clearTimeout = armWebSocket(ws, () =>
+    onError("连接 TTS 服务超时")
+  );
+  ws.onopen = () => {
+    clearTimeout();
     ws.send(
       JSON.stringify({
         type: "synthesize",
@@ -303,16 +383,30 @@ export function openTtsStream(
         domain_tn: domainTn && domainTn.length ? domainTn : undefined,
       })
     );
+  };
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "meta") onMeta(msg.sample_rate, msg.node, msg.model);
-      else if (msg.type === "done") onDone(msg.qos);
-      else if (msg.type === "error") onError(msg.message);
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "meta") onMeta(msg.sample_rate, msg.node, msg.model);
+        else if (msg.type === "done") {
+          expectedClose = true;
+          onDone(msg.qos);
+        } else if (msg.type === "error") {
+          expectedClose = true;
+          onError(msg.message);
+        }
+      } catch {
+        onError("TTS 服务返回了无法解析的消息");
+      }
     } else {
       onChunk(new Int16Array(ev.data as ArrayBuffer));
     }
   };
   ws.onerror = () => onError("WebSocket 错误");
+  ws.onclose = () => {
+    clearTimeout();
+    onClose(expectedClose);
+  };
   return ws;
 }

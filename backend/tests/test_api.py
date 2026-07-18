@@ -76,11 +76,31 @@ def test_asr_file_stub(client):
     assert body["audio_duration_ms"] > 0
 
 
+def test_asr_unknown_model_rejected(client):
+    files = {"file": ("test.wav", _wav_bytes(), "audio/wav")}
+    r = client.post(
+        "/api/v1/asr",
+        files=files,
+        data={"language": "zh", "model": "does-not-exist"},
+    )
+    assert r.status_code == 400
+    assert "未知 ASR 模型" in r.json()["detail"]
+
+
 def test_tts_file_stub(client):
     r = client.post("/api/v1/tts", json={"text": "你好世界", "voice": "中文女"})
     assert r.status_code == 200
     assert r.headers["content-type"] == "audio/wav"
     assert len(r.content) > 44  # WAV header + data
+
+
+def test_tts_unknown_model_rejected(client):
+    r = client.post(
+        "/api/v1/tts",
+        json={"text": "你好世界", "voice": "中文女", "model": "does-not-exist"},
+    )
+    assert r.status_code == 400
+    assert "未知 TTS 模型" in r.json()["detail"]
 
 
 def test_ws_tts_stream(client):
@@ -101,9 +121,20 @@ def test_ws_tts_stream(client):
         assert got_audio
 
 
+def test_ws_tts_invalid_speed_is_bad_request(client):
+    with client.websocket_connect("/ws/tts") as ws:
+        ws.send_json({"type": "synthesize", "text": "你好", "speed": "fast"})
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "bad_request"
+
+
 def test_ws_asr_stream(client):
     with client.websocket_connect("/ws/asr") as ws:
         ws.send_json({"type": "start", "sample_rate": 16000, "channels": 1})
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        assert ready["model"] == "stub-asr"
         pcm = np.zeros(16000, dtype=np.float32)
         ws.send_bytes(pcm.tobytes())
         ws.send_json({"type": "end"})

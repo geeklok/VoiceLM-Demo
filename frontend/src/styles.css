@@ -216,6 +216,7 @@ audio { width: 100%; margin-top: 16px; }
   border-radius: 50%;
   background: var(--muted);
 }
+.chat-state.connecting .chat-state-dot { background: #94a3b8; animation: pulse 1s infinite; }
 .chat-state.listening .chat-state-dot { background: #4ade80; animation: pulse 1.2s infinite; }
 .chat-state.thinking .chat-state-dot { background: #f59e0b; animation: pulse 1s infinite; }
 .chat-state.responding .chat-state-dot { background: var(--accent); animation: pulse 0.8s infinite; }
@@ -244,6 +245,10 @@ audio { width: 100%; margin-top: 16px; }
   font-size: 12px;
 }
 .chat-adv-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-fallback {
+  margin-left: 12px;
+  padding: 5px 10px;
+}
 
 .chat-controls {
   margin-top: 12px;

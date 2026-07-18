@@ -11,6 +11,24 @@ CosyVoice2 的首包延迟 (TTFB) 随输入文本长度增长（len=3→~1.6s，
 - 默认关闭（`TTS_SENTENCE_STREAM=false`），行为与现状逐字节一致 → 不影响 node2 基线、不影响现有测试。
 - 仅在 node1 打开做 after 对比；node2 保持基线作 before/after 锚点。
 
+## 当前流式生命周期与音色语义（2026-07-18）
+
+分句 TTFB 优化之外，流式 TTS 已补齐取消、背压和前端反馈：
+
+- CosyVoice 同步生成器与异步 WebSocket 之间改为有界队列，水位由 `TTS_STREAM_QUEUE_CHUNKS` 控制，默认 8。队列满时生产线程等待消费者，避免长文本音频块无界占用内存。
+- 客户端停止或断开时，路由显式 `aclose()` 流；引擎设置协作停止事件、关闭底层生成器并等待同步生产线程退出。外层 `GpuLimiter` 只有在线程结束后才释放 slot，避免旧请求仍占 GPU 时新请求进入。
+- 被取消的流式请求记录为 `tts_requests_total{mode="stream",status="cancelled"}`；正常流仍在 `done.qos` 返回 TTFB、总处理时长、音频时长和 RTF。
+- 前端只展示 `/api/v1/models` 返回的真实注册音色，未知音色返回 400 / WebSocket `bad_request`，不再伪造“中文男”等入口或静默回退默认音色。
+- TTS 页支持停止流式合成、异常关闭后恢复按钮、字符计数、音频 object URL 主动回收，以及“金融金额 + 号码逐位读”的 TN 冲突提示。
+
+当前生命周期：
+
+```text
+synthesize -> meta -> binary PCM... -> done(qos) -> close
+      |                                  ^
+      +-- client close -> stop event -> producer exit -> release GPU slot
+```
+
 ## 现状分析 (Current State Analysis)
 
 - **核心改造点** [dispatcher.py](../../backend/app/orchestration/dispatcher.py#L176-L228)：`tts_stream` 的 `guarded()` 内核当前在单个 `tts_slot()` 内对**整段 text** 调一次 `engine.synthesize_stream(text, ...)`。`ttfb_ms` 在首个 chunk 计时；`n_samples` 累加；流耗尽后填 `qos_holder` 并 `observe_tts`。

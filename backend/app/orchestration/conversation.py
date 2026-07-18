@@ -72,6 +72,7 @@ class ConversationOrchestrator:
         self._turn_endpoint_ms: Optional[int] = None
         self._turn_input_ms: Optional[int] = None
         self._interrupt_detected_at: Optional[float] = None
+        self._client_disconnected = False
 
     @property
     def _node(self) -> str:
@@ -150,6 +151,8 @@ class ConversationOrchestrator:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             await self._safe_close(ws)
+            if session_status == "ok" and self._client_disconnected:
+                session_status = "disconnected"
             observe_chat_session(self._provider, self._model_label, session_status)
 
     # ---- 接收循环 (独立 task, 唯一调用 ws.receive 的地方) -------------------
@@ -159,6 +162,7 @@ class ConversationOrchestrator:
             while True:
                 msg = await ws.receive()
                 if msg.get("type") == "websocket.disconnect":
+                    self._client_disconnected = True
                     break
                 if msg.get("bytes") is not None:
                     if self._state == "listening":
@@ -176,6 +180,13 @@ class ConversationOrchestrator:
                         continue
                     if ctrl.get("type") == "end":
                         break
+                    if (
+                        ctrl.get("type") == "cancel_response"
+                        and self._state in ("thinking", "responding")
+                    ):
+                        self._interrupt_detected_at = time.perf_counter()
+                        self._interrupt.set()
+                        continue
                     if ctrl.get("type") == "client_metric":
                         observe_chat_playback_underrun(
                             self._provider,
@@ -188,7 +199,7 @@ class ConversationOrchestrator:
                             int(ctrl.get("dropped_chunks") or 0),
                         )
         except WebSocketDisconnect:
-            pass
+            self._client_disconnected = True
         finally:
             self._stop.set()
             await self._pcm_q.put(None)  # 解阻塞正在等待的 listener
@@ -272,17 +283,23 @@ class ConversationOrchestrator:
         first_token_ms: Optional[int] = None
         tts_ttfb_ms: Optional[int] = None
         assistant_full = ""
+        spoken_full = ""
         buffer = ""
         meta_sent = False
         interrupted = False
         output_samples = 0
         output_sample_rate = 0
+        self._interrupt.clear()
+        self._interrupt_detected_at = None
 
         async def speak(sentence: str) -> bool:
             """合成并下发一句; 返回 True 表示中途被打断 (barge-in)。"""
             nonlocal meta_sent, output_sample_rate, output_samples, tts_ttfb_ms
+            nonlocal spoken_full
             if not sentence.strip():
                 return False
+            if self._interrupt.is_set():
+                return True
             stream, sr, meta, _qos = await self._disp.tts_stream(
                 sentence, self._voice, self._speed, None
             )
@@ -295,13 +312,14 @@ class ConversationOrchestrator:
                 )
                 meta_sent = True
             async for pcm_chunk in stream:
-                if self._barge_on and self._interrupt.is_set():
+                if self._interrupt.is_set():
                     await _aclose(stream)  # 停 TTS: 关闭生成器, 丢弃剩余音频
                     return True
                 if tts_ttfb_ms is None:
                     tts_ttfb_ms = int((time.perf_counter() - t_start) * 1000)
                 output_samples += len(pcm_chunk)
                 await ws.send_bytes(pcm_to_int16_bytes(pcm_chunk))
+            spoken_full += sentence
             return False
 
         watcher: Optional[asyncio.Task] = None
@@ -311,15 +329,34 @@ class ConversationOrchestrator:
             enable_thinking=self._agent_thinking,
         ).__aiter__()
         try:
-            # 首 token 单独超时, 防远端挂死。
-            try:
-                first = await asyncio.wait_for(
-                    agen.__anext__(), timeout=self._s.agent_first_token_timeout
-                )
-            except StopAsyncIteration:
+            # 首 token 等待与用户主动停止并行；停止思考不必等到远端先返回内容。
+            first_task = asyncio.create_task(agen.__anext__())
+            cancel_task = asyncio.create_task(self._interrupt.wait())
+            done, pending = await asyncio.wait(
+                {first_task, cancel_task},
+                timeout=self._s.agent_first_token_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                raise AgentError("Agent 首 token 超时")
+            if cancel_task in done and self._interrupt.is_set():
+                interrupted = True
+                first_task.cancel()
+                await asyncio.gather(first_task, return_exceptions=True)
                 first = None
-            except asyncio.TimeoutError as exc:
-                raise AgentError("Agent 首 token 超时") from exc
+            else:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                try:
+                    first = first_task.result()
+                except StopAsyncIteration:
+                    first = None
 
             if first is not None:
                 first_token_ms = int((time.perf_counter() - t_start) * 1000)
@@ -327,7 +364,6 @@ class ConversationOrchestrator:
                 await self._send_state(ws, "responding")
                 # barge-in: 进入 RESPONDING 才起 watcher (此后 _read_loop 把 PCM 路由到 _barge_q)。
                 if self._barge_on:
-                    self._interrupt.clear()
                     self._drain_barge()
                     watcher = asyncio.create_task(self._watch_interrupt())
 
@@ -337,7 +373,7 @@ class ConversationOrchestrator:
                         yield d
 
                 async for delta in deltas():
-                    if self._barge_on and self._interrupt.is_set():
+                    if self._interrupt.is_set():
                         interrupted = True
                         break
                     assistant_full += delta
@@ -394,9 +430,10 @@ class ConversationOrchestrator:
             await _aclose(agen)
             self._drain_barge()
 
-        # 写回 messages: 即使被打断, 已说出的部分也写回 (保留多轮上下文连贯)。
-        if assistant_full.strip():
-            self._messages.append({"role": "assistant", "content": assistant_full})
+        # 被打断时只记录完整下发完毕的句子，避免模型误以为用户已经听到了后续内容。
+        history_text = spoken_full if interrupted else assistant_full
+        if history_text.strip():
+            self._messages.append({"role": "assistant", "content": history_text})
 
         if interrupted:
             # 打断: 通知前端停播 + 清字幕, 直接回 LISTENING 接住用户新话 (不发 assistant_done)。
@@ -417,7 +454,10 @@ class ConversationOrchestrator:
                 output_audio_ms=_audio_ms(output_samples, output_sample_rate),
                 interrupt_ms=interrupt_ms,
             )
-            await self._safe_send(ws, {"type": "interrupted", "node": self._node})
+            await self._safe_send(
+                ws,
+                {"type": "interrupted", "text": spoken_full, "node": self._node},
+            )
             self._state = "listening"
             return
 

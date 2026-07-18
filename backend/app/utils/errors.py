@@ -8,3 +8,11 @@ class EngineNotReadyError(Exception):
 
 class UnsupportedParameterError(AudioProcessingError):
     """输入参数无法适配到模型契约。映射为 HTTP 400。"""
+
+
+class UnknownEngineError(ValueError):
+    """请求指定了未注册的推理引擎。映射为 HTTP 400。"""
+
+
+class UnknownVoiceError(ValueError):
+    """请求指定了未注册的 TTS 音色。映射为 HTTP 400。"""

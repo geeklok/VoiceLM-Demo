@@ -59,6 +59,13 @@ class ChatModelInfo(BaseModel):
     supports_barge_in: bool = True
     supports_vad_gate: bool = True
     preserves_paralinguistics: bool = False
+    default_barge_in: bool = False
+    default_vad_gate: bool = True
+    default_capture_profile: Literal["natural", "noise_reduction"] = (
+        "noise_reduction"
+    )
+    vad_silence_ms_options: list[int] = Field(default_factory=list)
+    default_vad_silence_ms: Optional[int] = None
 
 
 class ChatModelsResponse(BaseModel):

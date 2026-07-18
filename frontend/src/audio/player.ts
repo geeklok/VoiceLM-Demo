@@ -126,6 +126,14 @@ export class StreamingPcmPlayer {
     };
   }
 
+  /** 返回并清零自上次上报以来的播放指标，供每个对话回合独立计数。 */
+  takeStats(): StreamingPcmPlayerStats {
+    const stats = this.getStats();
+    this.playbackUnderruns = 0;
+    this.droppedChunks = 0;
+    return stats;
+  }
+
   /** 合并所有块为 WAV Blob, 供下载。 */
   toWavBlob(): Blob {
     const total = this.chunks.reduce((n, c) => n + c.length, 0);

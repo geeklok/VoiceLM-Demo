@@ -4,6 +4,7 @@ from typing import Optional
 
 from app.config import Settings
 from app.engines.base import ASREngine, TTSEngine
+from app.utils.errors import UnknownEngineError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -96,7 +97,9 @@ class EngineRegistry:
         return next(iter(self._asr), "")
 
     def asr(self, name: Optional[str] = None) -> ASREngine:
-        if name and name in self._asr:
+        if name:
+            if name not in self._asr:
+                raise UnknownEngineError(f"未知 ASR 模型: {name}")
             return self._asr[name]
         return self._asr[self._default_asr]
 
@@ -113,7 +116,9 @@ class EngineRegistry:
         return chain
 
     def tts(self, name: Optional[str] = None) -> TTSEngine:
-        if name and name in self._tts:
+        if name:
+            if name not in self._tts:
+                raise UnknownEngineError(f"未知 TTS 模型: {name}")
             return self._tts[name]
         return self._tts[self._default_tts]
 

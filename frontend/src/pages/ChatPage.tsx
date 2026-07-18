@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  CaptureProfile,
   ChatMode,
   ChatModelInfo,
   ChatQos,
@@ -8,6 +9,7 @@ import {
 } from "../api/client";
 import { MicRecorder, TARGET_SR } from "../audio/recorder";
 import { StreamingPcmPlayer } from "../audio/player";
+import { resolveChatDefaults } from "../chat/settings";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -17,6 +19,7 @@ interface ChatMessage {
 }
 
 type TurnState = "" | "listening" | "thinking" | "responding";
+type ConnectionState = "idle" | "connecting" | "connected";
 
 const STATE_LABEL: Record<TurnState, string> = {
   "": "未连接",
@@ -43,8 +46,10 @@ function buildVoiceOptions(backendVoices: string[]): VoiceOption[] {
 }
 
 export default function ChatPage() {
-  const [connected, setConnected] = useState(false);
+  const [connectionState, setConnectionState] =
+    useState<ConnectionState>("idle");
   const [turnState, setTurnState] = useState<TurnState>("");
+  const [stoppingResponse, setStoppingResponse] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [userPartial, setUserPartial] = useState("");
   const [assistantPartial, setAssistantPartial] = useState("");
@@ -60,11 +65,17 @@ export default function ChatPage() {
   const [enableThinking, setEnableThinking] = useState(false);
   const [voice, setVoice] = useState("");
   const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [captureProfile, setCaptureProfile] =
+    useState<CaptureProfile>("noise_reduction");
+  const [vadSilenceMs, setVadSilenceMs] = useState<number | undefined>(
+    undefined
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
   const playerRef = useRef<StreamingPcmPlayer | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stopRequestedRef = useRef(false);
 
   // 新消息/增量出现时滚到底
   useEffect(() => {
@@ -98,6 +109,11 @@ export default function ChatPage() {
     (item) => item.mode === mode && item.name === model
   );
   const modeOptions = Array.from(new Set(models.map((item) => item.mode)));
+  const connected = connectionState === "connected";
+  const sessionActive = connectionState !== "idle";
+  const cascadeFallback = models.find(
+    (item) => item.mode === "cascade" && item.default
+  ) || models.find((item) => item.mode === "cascade");
 
   function applyModel(selected: ChatModelInfo, available = models) {
     setMode(selected.mode);
@@ -108,9 +124,11 @@ export default function ChatPage() {
       options.some((opt) => opt.value === cur) ? cur : options[0]?.value || ""
     );
     if (!selected.supports_thinking) setEnableThinking(false);
-    if (selected.mode === "native") setBargeIn(true);
-    else if (!selected.supports_barge_in) setBargeIn(false);
-    if (!selected.supports_vad_gate) setVadGate(false);
+    const defaults = resolveChatDefaults(selected);
+    setBargeIn(defaults.bargeIn);
+    setVadGate(defaults.vadGate);
+    setCaptureProfile(defaults.captureProfile);
+    setVadSilenceMs(defaults.vadSilenceMs);
     if (!available.some((item) => item.name === selected.name)) {
       setModels(available);
     }
@@ -131,6 +149,7 @@ export default function ChatPage() {
   }
 
   function teardown() {
+    stopRequestedRef.current = true;
     recRef.current?.stop();
     recRef.current = null;
     try {
@@ -153,6 +172,9 @@ export default function ChatPage() {
       setError("没有可用的对话模型");
       return;
     }
+    stopRequestedRef.current = false;
+    setConnectionState("connecting");
+    setStoppingResponse(false);
 
     const player = new StreamingPcmPlayer({
       initialBufferMs: 100,
@@ -172,15 +194,23 @@ export default function ChatPage() {
         bargeIn,
         model,
         enableThinking,
+        vadSilenceMs,
       },
       {
         onReady: (n) => {
+          if (wsRef.current !== ws) return;
           setNode(n);
-          setConnected(true);
-          startMic(ws);
+          setConnectionState("connected");
+          startMic(
+            ws,
+            selectedModel.input_format,
+            selectedModel.supports_vad_gate && vadGate,
+            captureProfile
+          );
         },
         onState: (s, n) => {
           setTurnState(s as TurnState);
+          if (s === "listening") setStoppingResponse(false);
           if (n) setNode(n);
         },
         onUserPartial: (t) => setUserPartial(t),
@@ -193,25 +223,50 @@ export default function ChatPage() {
         onAudio: (pcm) => player.push(pcm),
         onAssistantDone: (t, qos, n) => {
           player.finishTurn();
+          reportPlaybackMetrics(ws, player);
+          setStoppingResponse(false);
           setAssistantPartial("");
           if (t.trim()) setMessages((m) => [...m, { role: "assistant", text: t, qos, node: n }]);
         },
-        onInterrupted: () => {
-          // barge-in: 用户插话打断了 AI。立即停外放, 把已说出的半句落为定稿气泡。
+        onInterrupted: (spokenText) => {
+          // 用户插话或手动停止：立即停外放，只记录服务端确认已说出的内容。
+          reportPlaybackMetrics(ws, player);
           player.stop();
+          setStoppingResponse(false);
           setAssistantPartial((cur) => {
-            if (cur.trim()) setMessages((m) => [...m, { role: "assistant", text: cur }]);
+            const spoken = spokenText?.trim() || cur.trim();
+            if (spoken) {
+              setMessages((m) => [...m, { role: "assistant", text: spoken }]);
+            }
             return "";
           });
         },
         onError: (code, message) => {
           if (code === "unavailable") {
-            setError("语音聊天未启用 (后端未配置远端 Agent)");
-            stop();
+            setError(
+              mode === "native"
+                ? "原生语音服务当前不可用"
+                : "级联语音聊天未启用"
+            );
           } else if (code === "busy") {
             setError("服务繁忙: " + message);
           } else {
             setError(message);
+          }
+        },
+        onClose: (expected) => {
+          if (wsRef.current !== ws) return;
+          wsRef.current = null;
+          recRef.current?.stop();
+          recRef.current = null;
+          playerRef.current?.close();
+          playerRef.current = null;
+          setConnectionState("idle");
+          setTurnState("");
+          setStoppingResponse(false);
+          setUserPartial("");
+          if (!expected && !stopRequestedRef.current) {
+            setError((cur) => cur || "语音聊天连接已断开，请重试");
           }
         },
       }
@@ -219,43 +274,51 @@ export default function ChatPage() {
     wsRef.current = ws;
   }
 
-  async function startMic(ws: WebSocket) {
+  async function startMic(
+    ws: WebSocket,
+    inputFormat: ChatModelInfo["input_format"],
+    gateVad: boolean,
+    profile: CaptureProfile
+  ) {
     const rec = new MicRecorder(
       (pcm) => {
         if (ws.readyState !== WebSocket.OPEN) return;
         const payload =
-          selectedModel?.input_format === "pcm_s16le"
+          inputFormat === "pcm_s16le"
             ? floatToInt16(pcm)
             : pcm;
         ws.send(payload.buffer);
       },
-      { gateVad: selectedModel?.supports_vad_gate ? vadGate : false }
+      {
+        gateVad,
+        preRollMs: 200,
+        captureProfile: profile,
+      }
     );
     recRef.current = rec;
     try {
       await rec.start();
+      if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) {
+        rec.stop();
+        if (recRef.current === rec) recRef.current = null;
+      }
     } catch (err) {
+      if (wsRef.current !== ws) return;
       setError("无法访问麦克风: " + String(err));
       stop();
     }
   }
 
   function stop() {
+    stopRequestedRef.current = true;
     recRef.current?.stop();
     recRef.current = null;
     const ws = wsRef.current;
-    const stats = playerRef.current?.getStats();
     try {
-      if (ws?.readyState === WebSocket.OPEN && stats) {
-        ws.send(
-          JSON.stringify({
-            type: "client_metric",
-            playback_underruns: stats.playbackUnderruns,
-            dropped_chunks: stats.droppedChunks,
-          })
-        );
+      if (ws?.readyState === WebSocket.OPEN) {
+        if (playerRef.current) reportPlaybackMetrics(ws, playerRef.current);
+        ws.send(JSON.stringify({ type: "end" }));
       }
-      ws?.send(JSON.stringify({ type: "end" }));
     } catch {
       /* ignore */
     }
@@ -267,9 +330,33 @@ export default function ChatPage() {
     wsRef.current = null;
     playerRef.current?.close();
     playerRef.current = null;
-    setConnected(false);
+    setConnectionState("idle");
     setTurnState("");
+    setStoppingResponse(false);
     setUserPartial("");
+  }
+
+  function stopResponse() {
+    const ws = wsRef.current;
+    if (
+      ws?.readyState !== WebSocket.OPEN ||
+      !["thinking", "responding"].includes(turnState)
+    ) {
+      return;
+    }
+    if (playerRef.current) {
+      reportPlaybackMetrics(ws, playerRef.current);
+      playerRef.current.stop();
+    }
+    ws.send(JSON.stringify({ type: "cancel_response" }));
+    setStoppingResponse(true);
+  }
+
+  function switchToCascade() {
+    if (!cascadeFallback) return;
+    if (sessionActive) stop();
+    applyModel(cascadeFallback);
+    setError("");
   }
 
   const hasConversation =
@@ -278,26 +365,41 @@ export default function ChatPage() {
   return (
     <div className="panel">
       <div className="chat-toolbar">
-        {!connected ? (
-          <button className="primary" onClick={start}>
+        {connectionState === "idle" ? (
+          <button className="primary" onClick={start} disabled={!selectedModel}>
             ● 开始对话
+          </button>
+        ) : connectionState === "connecting" ? (
+          <button className="ghost rec" onClick={stop}>
+            ■ 取消连接
           </button>
         ) : (
           <button className="ghost rec active" onClick={stop}>
             ■ 结束对话
           </button>
         )}
-        {connected && (
-          <span className={`chat-state ${turnState}`}>
+        {sessionActive && (
+          <span className={`chat-state ${connectionState === "connecting" ? "connecting" : turnState}`}>
             <span className="chat-state-dot" />
-            {STATE_LABEL[turnState] || "聆听中"}
+            {connectionState === "connecting"
+              ? "连接中"
+              : STATE_LABEL[turnState] || "聆听中"}
           </span>
+        )}
+        {connected && (turnState === "thinking" || turnState === "responding") && (
+          <button
+            className="ghost rec"
+            onClick={stopResponse}
+            disabled={stoppingResponse}
+          >
+            {stoppingResponse ? "正在停止..." : "停止当前回复"}
+          </button>
         )}
         {node && <span className="chat-node">{node}</span>}
         <button
           className="chat-adv-toggle"
           onClick={() => setShowAdvanced((v) => !v)}
-          disabled={connected}
+          disabled={sessionActive}
         >
           {showAdvanced ? "收起设置" : "高级设置"}
         </button>
@@ -309,7 +411,7 @@ export default function ChatPage() {
           <select
             value={mode}
             onChange={(e) => selectMode(e.target.value as ChatMode)}
-            disabled={connected || modeOptions.length < 2}
+            disabled={sessionActive || modeOptions.length < 2}
           >
             {modeOptions.map((item) => (
               <option key={item} value={item}>
@@ -323,7 +425,7 @@ export default function ChatPage() {
           <select
             value={model}
             onChange={(e) => selectModel(e.target.value)}
-            disabled={connected}
+            disabled={sessionActive}
           >
             {models
               .filter((item) => item.mode === mode)
@@ -339,7 +441,7 @@ export default function ChatPage() {
             type="checkbox"
             checked={enableThinking}
             onChange={(e) => setEnableThinking(e.target.checked)}
-            disabled={connected || !selectedModel?.supports_thinking}
+            disabled={sessionActive || !selectedModel?.supports_thinking}
           />
           <span>思考模式 (仅混合推理模型生效, 首字延迟更高)</span>
         </label>
@@ -348,13 +450,13 @@ export default function ChatPage() {
         )}
       </div>
 
-      {showAdvanced && !connected && (
+      {showAdvanced && !sessionActive && (
         <div className="chat-advanced">
           <label>回复音色</label>
           <select
             value={voice}
             onChange={(e) => setVoice(e.target.value)}
-            disabled={connected || voices.length === 0}
+            disabled={sessionActive || voices.length === 0}
           >
             {voices.map((v) => (
               <option key={v.value} value={v.value}>
@@ -369,6 +471,37 @@ export default function ChatPage() {
             placeholder="例如: 你是一个友好的语音助手，用简短口语化的中文回答。"
             onChange={(e) => setSystemPrompt(e.target.value)}
           />
+          <label>麦克风处理</label>
+          <select
+            value={captureProfile}
+            onChange={(e) =>
+              setCaptureProfile(e.target.value as CaptureProfile)
+            }
+          >
+            <option value="natural">自然采音 (保留语气，AEC 开)</option>
+            <option value="noise_reduction">嘈杂环境 (AEC/降噪/AGC 开)</option>
+          </select>
+          {!!selectedModel?.vad_silence_ms_options.length && (
+            <>
+              <label>停顿判句</label>
+              <select
+                value={vadSilenceMs ?? ""}
+                onChange={(e) => setVadSilenceMs(Number(e.target.value))}
+              >
+                {selectedModel.vad_silence_ms_options.map((value) => (
+                  <option key={value} value={value}>
+                    {value === 800
+                      ? "快速 (800ms)"
+                      : value === 1500
+                        ? "均衡 (1500ms)"
+                        : value === 2000
+                          ? "长停顿 (2000ms)"
+                          : `${value}ms`}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
@@ -395,6 +528,11 @@ export default function ChatPage() {
       {error && (
         <div className="result" style={{ color: "#f87171" }}>
           {error}
+          {mode === "native" && cascadeFallback && (
+            <button className="ghost chat-fallback" onClick={switchToCascade}>
+              切换到级联模式
+            </button>
+          )}
         </div>
       )}
 
@@ -419,6 +557,22 @@ export default function ChatPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function reportPlaybackMetrics(
+  ws: WebSocket,
+  player: StreamingPcmPlayer
+): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const stats = player.takeStats();
+  if (!stats.playbackUnderruns && !stats.droppedChunks) return;
+  ws.send(
+    JSON.stringify({
+      type: "client_metric",
+      playback_underruns: stats.playbackUnderruns,
+      dropped_chunks: stats.droppedChunks,
+    })
   );
 }
 

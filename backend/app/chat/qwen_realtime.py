@@ -42,6 +42,7 @@ class _SessionState:
     first_text_ms: Optional[int] = None
     first_audio_ms: Optional[int] = None
     input_bytes: int = 0
+    turn_input_bytes: int = 0
     total_input_bytes: int = 0
     output_bytes: int = 0
     assistant_text: str = ""
@@ -146,9 +147,11 @@ class QwenRealtimeProvider(ChatProvider):
                     except (asyncio.CancelledError, Exception):  # noqa: BLE001
                         pass
                 for task in done:
-                    task.result()
+                    outcome = task.result()
+                    if task is browser_task and outcome == "disconnected":
+                        session_status = "disconnected"
         except WebSocketDisconnect:
-            pass
+            session_status = "disconnected"
         except Exception as exc:  # noqa: BLE001
             session_status = "error"
             logger.exception("qwen realtime session failed")
@@ -193,11 +196,11 @@ class QwenRealtimeProvider(ChatProvider):
 
     async def _browser_to_provider(
         self, ws: WebSocket, upstream: Any, state: _SessionState
-    ) -> None:
+    ) -> str:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
-                return
+                return "disconnected"
             if msg.get("bytes") is not None:
                 pcm = self._to_pcm16(msg["bytes"], state.input_format)
                 state.input_bytes += len(pcm)
@@ -220,7 +223,22 @@ class QwenRealtimeProvider(ChatProvider):
             except json.JSONDecodeError:
                 continue
             if ctrl.get("type") == "end":
-                return
+                return "ok"
+            if ctrl.get("type") == "cancel_response" and state.active_response:
+                if not state.interrupted:
+                    state.interrupted = True
+                    state.interrupt_detected_at = time.perf_counter()
+                    await self._cancel_response(upstream)
+                    await ws.send_json(
+                        {
+                            "type": "interrupted",
+                            "text": state.assistant_text,
+                            "node": self._s.node_name,
+                            "provider": self.name,
+                        }
+                    )
+                    await self._send_state(ws, "listening")
+                continue
             if ctrl.get("type") == "client_metric":
                 underruns = int(ctrl.get("playback_underruns") or 0)
                 observe_chat_playback_underrun(
@@ -237,10 +255,14 @@ class QwenRealtimeProvider(ChatProvider):
     ) -> None:
         async for raw in upstream:
             event = self._decode_event(raw)
-            await self._handle_server_event(ws, event, state)
+            await self._handle_server_event(ws, event, state, upstream)
 
     async def _handle_server_event(
-        self, ws: WebSocket, event: dict, state: _SessionState
+        self,
+        ws: WebSocket,
+        event: dict,
+        state: _SessionState,
+        upstream: Any = None,
     ) -> None:
         event_type = event.get("type", "")
         now = time.perf_counter()
@@ -248,12 +270,15 @@ class QwenRealtimeProvider(ChatProvider):
         if event_type == "input_audio_buffer.speech_started":
             state.speech_active = True
             state.input_bytes = 0
-            if state.active_response:
+            state.turn_input_bytes = 0
+            if state.active_response and not state.interrupted:
                 state.interrupted = True
                 state.interrupt_detected_at = now
+                await self._cancel_response(upstream)
                 await ws.send_json(
                     {
                         "type": "interrupted",
+                        "text": state.assistant_text,
                         "node": self._s.node_name,
                         "provider": self.name,
                     }
@@ -264,6 +289,7 @@ class QwenRealtimeProvider(ChatProvider):
         if event_type == "input_audio_buffer.speech_stopped":
             state.speech_active = False
             state.speech_stopped_at = now
+            state.turn_input_bytes = state.input_bytes
             audio_end_ms = event.get("audio_end_ms")
             if isinstance(audio_end_ms, (int, float)):
                 sent_audio_ms = self._pcm_ms(state.total_input_bytes, 16000) or 0
@@ -393,7 +419,7 @@ class QwenRealtimeProvider(ChatProvider):
             endpoint_ms=state.endpoint_ms,
             first_audio_ms=state.first_audio_ms,
             total_ms=total_ms,
-            input_audio_ms=self._pcm_ms(state.input_bytes, 16000),
+            input_audio_ms=self._pcm_ms(state.turn_input_bytes, 16000),
             output_audio_ms=self._pcm_ms(state.output_bytes, 24000),
             interrupt_ms=interrupt_ms,
         )
@@ -420,8 +446,22 @@ class QwenRealtimeProvider(ChatProvider):
         state.endpoint_ms = None
         state.output_bytes = 0
         state.assistant_text = ""
+        state.turn_input_bytes = 0
         if not state.speech_active:
             state.input_bytes = 0
+
+    async def _cancel_response(self, upstream: Any) -> None:
+        """尽力取消上游仍在生成的回复，避免只停本地播放却继续计费和占并发。"""
+        if upstream is None:
+            return
+        try:
+            await upstream.send(
+                json.dumps(
+                    {"event_id": self._event_id(), "type": "response.cancel"}
+                )
+            )
+        except Exception:  # noqa: BLE001 - 上游可能已自行取消/关闭
+            logger.debug("qwen realtime response.cancel ignored", exc_info=True)
 
     def _session_update(self, start: dict) -> dict:
         requested_voice = str(start.get("voice") or "")
@@ -433,6 +473,13 @@ class QwenRealtimeProvider(ChatProvider):
         instructions = str(
             start.get("system_prompt") or self._s.qwen_omni_system_prompt
         )[:4000]
+        silence_ms = self._s.qwen_omni_silence_ms
+        try:
+            requested_silence_ms = int(start.get("vad_silence_ms") or 0)
+        except (TypeError, ValueError):
+            requested_silence_ms = 0
+        if requested_silence_ms in self._s.qwen_omni_silence_options:
+            silence_ms = requested_silence_ms
         session: dict[str, Any] = {
             "modalities": ["text", "audio"],
             "voice": voice,
@@ -442,7 +489,7 @@ class QwenRealtimeProvider(ChatProvider):
             "turn_detection": {
                 "type": self._s.qwen_omni_turn_detection,
                 "threshold": self._s.qwen_omni_vad_threshold,
-                "silence_duration_ms": self._s.qwen_omni_silence_ms,
+                "silence_duration_ms": silence_ms,
             },
             "temperature": self._s.qwen_omni_temperature,
             "max_tokens": self._s.qwen_omni_max_tokens,

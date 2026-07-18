@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     # 单段最小字符数: >0 时贪心合并过短段, 让每段音频足够长以盖住
     # 下一段 LLM prefill, 消除句间播放间隙 (用一点 TTFB 换平滑)。0=不合并。
     tts_min_sentence_chars: int = 0
+    # 同步 CosyVoice 生成线程到 WebSocket 消费端之间的有界队列水位。
+    # 队列满时对推理线程施加背压，客户端断开时可协作取消，避免无界积压。
+    tts_stream_queue_chunks: int = 8
 
     # ---- 语音聊天 (Phase 3 能力扩展: speech-to-speech) ----
     # 总开关; False 或未配 agent_endpoint 时 /ws/chat 直接回 unavailable, 不影响 ASR/TTS。
@@ -191,6 +194,8 @@ class Settings(BaseSettings):
     qwen_omni_turn_detection: Literal["server_vad", "semantic_vad"] = "semantic_vad"
     qwen_omni_vad_threshold: float = 0.5
     qwen_omni_silence_ms: int = 2000
+    # 前端可选的端点档位：快速 / 均衡 / 长停顿。未命中列表时回退默认值。
+    qwen_omni_silence_options: list[int] = [800, 1500, 2000]
     qwen_omni_input_transcription: bool = True
 
 

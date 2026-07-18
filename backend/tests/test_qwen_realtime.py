@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 
 import numpy as np
 
@@ -26,6 +27,26 @@ class _FakeWS:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeUpstream:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(json.loads(payload))
+
+
+class _ControlWS(_FakeWS):
+    def __init__(self, controls: list[dict]) -> None:
+        super().__init__()
+        self._controls = iter(controls)
+
+    async def receive(self) -> dict:
+        return {
+            "type": "websocket.receive",
+            "text": json.dumps(next(self._controls)),
+        }
 
 
 def _settings() -> Settings:
@@ -73,6 +94,10 @@ def test_session_update_and_model_url_are_allowlisted():
         "wss://workspace.example/api-ws/v1/realtime?"
         "foo=bar&model=qwen3.5-omni-plus-realtime"
     )
+    fast = provider._session_update({"vad_silence_ms": 800})
+    assert fast["session"]["turn_detection"]["silence_duration_ms"] == 800
+    invalid = provider._session_update({"vad_silence_ms": 999})
+    assert invalid["session"]["turn_detection"]["silence_duration_ms"] == 600
 
 
 def test_pcm_conversion_supports_native_int16_and_float32():
@@ -166,6 +191,7 @@ def test_server_events_map_to_existing_chat_protocol():
 def test_speech_start_interrupts_and_drops_late_audio():
     provider = QwenRealtimeProvider(_settings())
     ws = _FakeWS()
+    upstream = _FakeUpstream()
     state = _SessionState(
         model="qwen3.5-omni-flash-realtime",
         input_format="pcm_s16le",
@@ -174,7 +200,7 @@ def test_speech_start_interrupts_and_drops_late_audio():
 
     async def run() -> None:
         await provider._handle_server_event(
-            ws, {"type": "input_audio_buffer.speech_started"}, state
+            ws, {"type": "input_audio_buffer.speech_started"}, state, upstream
         )
         await provider._handle_server_event(
             ws,
@@ -189,6 +215,45 @@ def test_speech_start_interrupts_and_drops_late_audio():
 
     assert any(item["type"] == "interrupted" for item in ws.json)
     assert ws.audio == []
+    assert any(item["type"] == "response.cancel" for item in upstream.sent)
+
+
+def test_manual_cancel_stops_active_upstream_response():
+    provider = QwenRealtimeProvider(_settings())
+    ws = _ControlWS([{"type": "cancel_response"}, {"type": "end"}])
+    upstream = _FakeUpstream()
+    state = _SessionState(
+        model="qwen3.5-omni-flash-realtime",
+        input_format="pcm_s16le",
+        active_response=True,
+        assistant_text="已播放内容",
+    )
+
+    asyncio.run(provider._browser_to_provider(ws, upstream, state))
+
+    assert any(item["type"] == "response.cancel" for item in upstream.sent)
+    interrupted = next(item for item in ws.json if item["type"] == "interrupted")
+    assert interrupted["text"] == "已播放内容"
+    assert state.interrupted is True
+
+
+def test_speech_stop_freezes_turn_input_size():
+    provider = QwenRealtimeProvider(_settings())
+    ws = _FakeWS()
+    state = _SessionState(
+        model="qwen3.5-omni-flash-realtime",
+        input_format="pcm_s16le",
+        input_bytes=32000,
+    )
+
+    async def run() -> None:
+        await provider._handle_server_event(
+            ws, {"type": "input_audio_buffer.speech_stopped"}, state
+        )
+        state.input_bytes += 64000
+
+    asyncio.run(run())
+    assert state.turn_input_bytes == 32000
 
 
 def test_chat_model_catalog_is_driven_by_configured_providers():
@@ -224,3 +289,6 @@ def test_chat_model_catalog_is_driven_by_configured_providers():
     assert native.input_format == "pcm_s16le"
     assert native.preserves_paralinguistics is True
     assert native.supports_vad_gate is False
+    assert native.default_capture_profile == "natural"
+    assert native.default_barge_in is True
+    assert native.vad_silence_ms_options == [800, 1500, 2000]

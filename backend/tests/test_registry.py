@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from app.config import Settings
 from app.engines.base import ASREngine, ASRPartial, ASRResult
 from app.engines.registry import EngineRegistry
+from app.utils.errors import UnknownEngineError
 
 
 class _FakeASR(ASREngine):
@@ -19,7 +22,7 @@ class _FakeASR(ASREngine):
         yield ASRPartial(text=self.name, is_final=True)
 
 
-def _registry_with(monkeypatch, names, default=""):
+def _registry_with(names, default=""):
     settings = Settings(asr_engine="stub", tts_engine="stub", default_asr_model=default)
     reg = EngineRegistry(settings)
     # 替换内部 ASR 字典为可控的多引擎集合, 验证选择逻辑
@@ -28,26 +31,27 @@ def _registry_with(monkeypatch, names, default=""):
     return reg
 
 
-def test_default_asr_first_when_unset(monkeypatch):
-    reg = _registry_with(monkeypatch, ["a", "b"], default="")
+def test_default_asr_first_when_unset():
+    reg = _registry_with(["a", "b"], default="")
     assert reg.default_asr == "a"
     assert reg.asr().name == "a"
 
 
-def test_default_asr_honored(monkeypatch):
-    reg = _registry_with(monkeypatch, ["a", "b"], default="b")
+def test_default_asr_honored():
+    reg = _registry_with(["a", "b"], default="b")
     assert reg.default_asr == "b"
     assert reg.asr().name == "b"
 
 
-def test_asr_select_by_name(monkeypatch):
-    reg = _registry_with(monkeypatch, ["a", "b"], default="a")
+def test_asr_select_by_name():
+    reg = _registry_with(["a", "b"], default="a")
     assert reg.asr("b").name == "b"
 
 
-def test_asr_unknown_name_falls_back_to_default(monkeypatch):
-    reg = _registry_with(monkeypatch, ["a", "b"], default="a")
-    assert reg.asr("does-not-exist").name == "a"
+def test_asr_unknown_name_is_rejected():
+    reg = _registry_with(["a", "b"], default="a")
+    with pytest.raises(UnknownEngineError, match="未知 ASR 模型"):
+        reg.asr("does-not-exist")
 
 
 def test_paraformer_registered_when_configured():

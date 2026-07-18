@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import AsyncIterator
 
 import numpy as np
 
 from app.config import Settings
 from app.engines.base import TTSEngine
+from app.utils.errors import UnknownVoiceError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,11 +94,12 @@ class CosyVoiceEngine(TTSEngine):
         if voice in self._voices:
             return voice
         default = self._settings.cosyvoice_default_voice
-        if default in self._voices:
+        # 兼容历史配置把默认女声展示名写成「中文女」、实际注册 id 写成 default。
+        if (not voice or voice == "中文女") and default in self._voices:
             return default
-        if self._voices:
-            return self._voices[0]
-        raise RuntimeError("CosyVoice2 无可用音色: 请在配置中预注册参考音频")
+        if not self._voices:
+            raise RuntimeError("CosyVoice2 无可用音色: 请在配置中预注册参考音频")
+        raise UnknownVoiceError(f"未知 TTS 音色: {voice}")
 
     def _generate(self, text: str, voice: str, speed: float, stream: bool):
         return self._model.inference_zero_shot(
@@ -120,27 +124,66 @@ class CosyVoiceEngine(TTSEngine):
         self, text: str, voice: str = "default", speed: float = 1.0
     ) -> AsyncIterator[np.ndarray]:
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(
+            maxsize=max(1, self._settings.tts_stream_queue_chunks)
+        )
         _DONE = object()
+        stop = threading.Event()
+
+        def _put(item: object) -> bool:
+            """从推理线程向异步队列写入，并让队列水位对生产端形成背压。"""
+            future = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+            while True:
+                try:
+                    future.result(timeout=0.1)
+                    return True
+                except FutureTimeoutError:
+                    if stop.is_set():
+                        future.cancel()
+                        return False
+                except Exception:  # 事件循环已关闭或写入被取消
+                    return False
 
         def _produce() -> None:
+            generator = None
             try:
                 self._load()
                 spk = self._resolve_voice(voice)
                 # 流式模式 speed 无效 (CosyVoice 流式不做插值), 这里传 1.0 保持一致
-                for out in self._generate(text, spk, 1.0, stream=True):
+                generator = iter(self._generate(text, spk, 1.0, stream=True))
+                while not stop.is_set():
+                    try:
+                        out = next(generator)
+                    except StopIteration:
+                        break
                     pcm = out["tts_speech"].numpy().flatten().astype(np.float32)
-                    loop.call_soon_threadsafe(queue.put_nowait, pcm)
+                    if not _put(pcm):
+                        break
             except Exception as exc:  # noqa: BLE001 - 透传到消费侧
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
+                if not stop.is_set():
+                    _put(exc)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+                if stop.is_set() and generator is not None:
+                    close = getattr(generator, "close", None)
+                    if close is not None:
+                        close()
+                if not stop.is_set():
+                    _put(_DONE)
 
-        asyncio.create_task(asyncio.to_thread(_produce))
-        while True:
-            item = await queue.get()
-            if item is _DONE:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        producer = asyncio.create_task(asyncio.to_thread(_produce))
+        try:
+            while True:
+                item = await queue.get()
+                if item is _DONE:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            # 客户端断开或 barge-in 关闭消费端时，通知同步生成器尽快停下；
+            # 等生产线程退出后上层才释放 TTS limiter，避免“幽灵推理”与新请求并发。
+            stop.set()
+            try:
+                await producer
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass

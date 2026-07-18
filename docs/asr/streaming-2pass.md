@@ -13,6 +13,34 @@
 
 设计目标：尽量降低字符输出延迟（首字 ≈ 一个 600ms 聚合窗 + 推理），同时保留整句修正以保证准确率。
 
+## 当前连接与输入体验（2026-07-18）
+
+实时 ASR 在既有 2-pass 识别之上补齐了连接生命周期，当前协议顺序为：
+
+```text
+client -> {type:"start", model, sample_rate, channels, language, hotwords}
+server -> {type:"ready", node, model}
+client -> binary PCM...
+server -> partial/final...
+client -> {type:"end"}
+server -> close
+```
+
+- 前端处于 `connecting` 时不开麦，收到 `ready` 后才申请麦克风并进入 `recording`，避免建连和模型校验期间丢掉第一句话。
+- 本地能量 VAD 从静音转为有声时补发 200 ms pre-roll，降低首字、句首辅音被门控吞掉的概率；ASR 默认采用 AEC/降噪/AGC 全开的嘈杂环境采音档位。
+- 停止录音后进入 `finalizing`，等待服务端最后一条 `final` 再复位，避免非流式 fallback 的定稿结果被客户端提前关连接丢弃。
+- 前端为连接建立设置 10 秒超时，并在异常关闭时恢复按钮状态。显式传入未注册模型时，服务端返回 `bad_request`，不再使用默认模型掩盖配置错误。
+- 文件 ASR 上传按块限长；同步 `ffmpeg` 预处理在线程池执行，相同采样率/声道契约的 fallback 模型复用解码结果。
+
+新增 Prometheus 指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| `asr_stream_sessions_total{model,status}` | 流式会话正常、繁忙、错误和断线数量 |
+| `asr_stream_first_result_seconds{model}` | 从首块输入音频到首个 partial/final 的延迟 |
+| `asr_stream_revisions_total{model}` | 同一 `segment_id` 文本发生变化的次数 |
+| `asr_stream_finals_total{model}` | 定稿分段数；可与 revisions 计算修订率 |
+
 ---
 
 ## 现状分析（Current State Analysis）

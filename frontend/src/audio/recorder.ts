@@ -29,6 +29,27 @@ export interface MicRecorderOptions {
   gateVad?: boolean;          // 是否启用能量 VAD 门控 (默认 false = 原持续上送)
   hangoverMs?: number;        // 判静音后继续上送时长 (默认 400ms, 防切句尾)
   energyMarginDb?: number;    // 高于噪声底多少 dB 判为有声 (默认 6dB)
+  preRollMs?: number;         // 从静音转有声时补发此前音频，避免吞掉首音节
+  captureProfile?: CaptureProfile;
+}
+
+export type CaptureProfile = "natural" | "noise_reduction";
+
+export function captureConstraints(
+  profile: CaptureProfile
+): MediaTrackConstraints {
+  if (profile === "natural") {
+    return {
+      echoCancellation: true,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+  }
+  return {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
 }
 
 export class MicRecorder {
@@ -42,9 +63,13 @@ export class MicRecorder {
   private gateVad: boolean;
   private hangoverMs: number;
   private energyMarginDb: number;
-  private noiseFloor = 1e-4;   // 自适应噪声底 (RMS), 初值很小
+  private preRollMs: number;
+  private captureProfile: CaptureProfile;
+  private noiseFloor = 1e-3;   // 自适应噪声底 (RMS)
   private voiced = false;
   private hangoverUntil = 0;   // performance.now() 时间戳, 在此之前继续送
+  private preRoll: Float32Array[] = [];
+  private preRollSamples = 0;
 
   constructor(
     private onChunk: (pcm16k: Float32Array) => void,
@@ -53,17 +78,15 @@ export class MicRecorder {
     this.gateVad = opts.gateVad ?? false;
     this.hangoverMs = opts.hangoverMs ?? 400;
     this.energyMarginDb = opts.energyMarginDb ?? 6;
+    this.preRollMs = opts.preRollMs ?? 200;
+    this.captureProfile = opts.captureProfile ?? "noise_reduction";
   }
 
   async start(): Promise<void> {
     // 开浏览器端 AEC/降噪/自动增益: barge-in 场景抑制外放回声被麦克风采回,
     // 避免把 AI 自己的声音当成用户插话 (自打断)。免耳机的基本保障。
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
+      audio: captureConstraints(this.captureProfile),
     });
     this.ctx = new AudioContext();
     this.source = this.ctx.createMediaStreamSource(this.stream);
@@ -108,8 +131,31 @@ export class MicRecorder {
 
   private emitFrame(input: Float32Array, srcSr: number): void {
     const resampled = downsample(input, srcSr, TARGET_SR);
-    if (!this.gateVad || this.shouldSend(input)) {
+    if (!this.gateVad) {
       this.onChunk(resampled);
+      return;
+    }
+    const wasVoiced = this.voiced;
+    const send = this.shouldSend(input);
+    if (send) {
+      if (!wasVoiced && this.voiced) {
+        for (const frame of this.preRoll) this.onChunk(frame);
+        this.preRoll = [];
+        this.preRollSamples = 0;
+      }
+      this.onChunk(resampled);
+    } else {
+      this.pushPreRoll(resampled);
+    }
+  }
+
+  private pushPreRoll(frame: Float32Array): void {
+    this.preRoll.push(frame);
+    this.preRollSamples += frame.length;
+    const maxSamples = TARGET_SR * this.preRollMs / 1000;
+    while (this.preRollSamples > maxSamples && this.preRoll.length > 1) {
+      const removed = this.preRoll.shift();
+      if (removed) this.preRollSamples -= removed.length;
     }
   }
 
@@ -150,6 +196,8 @@ export class MicRecorder {
     this.ctx = undefined;
     this.voiced = false;
     this.hangoverUntil = 0;
+    this.preRoll = [];
+    this.preRollSamples = 0;
   }
 }
 

@@ -6,7 +6,7 @@ from typing import AsyncIterator, Optional
 
 import numpy as np
 
-from app.audio.pipeline import preprocess_file, preprocess_pcm
+from app.audio.pipeline import PreprocessResult, preprocess_file, preprocess_pcm
 from app.engines.base import ASRPartial
 from app.engines.registry import EngineRegistry
 from app.observability.metrics import (
@@ -75,15 +75,22 @@ class Dispatcher:
         primary_name = chain[0].name
 
         last_exc: Optional[Exception] = None
+        preprocessed: dict[tuple[int, int], PreprocessResult] = {}
         for engine in chain:
             if self._breaker.is_open(engine.name):
                 logger.warning("skip engine=%s (circuit open)", engine.name)
                 continue
-            pre = preprocess_file(
-                data,
-                target_sr=engine.expected_sample_rate,
-                target_channels=engine.expected_channels,
-            )
+            contract = (engine.expected_sample_rate, engine.expected_channels)
+            pre = preprocessed.get(contract)
+            if pre is None:
+                # ffmpeg 使用同步 subprocess；移到线程池，避免阻塞 FastAPI 事件循环。
+                pre = await asyncio.to_thread(
+                    preprocess_file,
+                    data,
+                    target_sr=engine.expected_sample_rate,
+                    target_channels=engine.expected_channels,
+                )
+                preprocessed[contract] = pre
             try:
                 async with self._limiter.asr_slot():
                     t0 = time.perf_counter()
@@ -248,6 +255,9 @@ class Dispatcher:
                     audio_ms=audio_ms,
                     rtf=round(rtf, 4) if rtf is not None else None,
                 )
+            except (asyncio.CancelledError, GeneratorExit):
+                observe_tts(engine.name, "stream", status="cancelled")
+                raise
             except ConcurrencyLimitError:
                 raise
             except Exception:

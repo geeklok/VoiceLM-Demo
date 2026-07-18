@@ -1,6 +1,6 @@
 # 原生端到端语音对话升级方案
 
-> 状态：代码已落地，默认关闭；配置百炼 Workspace 地址与 API Key 后前端默认优先使用原生语音模式，并可与级联模式做线上 A/B。
+> 状态：代码已落地；配置百炼 Workspace 地址与 API Key 后前端默认优先使用原生语音模式，并可与级联模式做线上 A/B。更新：2026-07-18。
 
 ## 1. 架构
 
@@ -23,10 +23,13 @@ Browser
 ## 2. 前端行为
 
 - 工具栏通过 `GET /api/v1/chat/models` 动态展示实际可用的模式、模型和音色；如果后端暴露原生模型，默认选中原生语音，否则回退级联。
-- 原生模式持续上传 20 ms PCM 块，强制关闭前端能量 VAD，保留停顿、笑声和呼吸等信息。
+- 能力目录同时下发 Provider 推荐值。原生模式默认开启 barge-in、关闭前端能量 VAD、使用自然采音；级联模式默认开启本地 VAD、使用嘈杂环境采音。每次切换 Provider 都完整重置，避免参数串扰。
+- 原生模式持续上传 20 ms PCM 块，关闭前端能量 VAD，保留停顿、笑声和呼吸等信息。自然采音保持 AEC 开启，但关闭浏览器降噪和 AGC。
 - 采集优先使用 `AudioWorklet`；旧浏览器回退 `ScriptProcessorNode`。
-- 播放器使用 100 ms 启动缓冲和 120 秒安全队列上限。超限丢块和播放欠载会在结束会话时回传后端。
+- 播放器使用 100 ms 启动缓冲和 120 秒安全队列上限。超限丢块和播放欠载按回合回传后端，上报后清零。
 - 两种模式继续复用浏览器 AEC、流式字幕、立即停播和现有消息气泡。
+- 前端有明确的 `connecting` 状态、10 秒建连超时和异常关闭恢复；原生 Provider 不可用时可一键切换到级联模式。
+- THINKING/RESPONDING 状态显示“停止当前回复”。原生模式会立即停播并向上游发送 `response.cancel`，避免仍在云端继续生成和计费。
 
 ## 3. 配置
 
@@ -45,9 +48,10 @@ QWEN_OMNI_CONCURRENCY=4
 QWEN_OMNI_TURN_DETECTION=semantic_vad
 QWEN_OMNI_VAD_THRESHOLD=0.5
 QWEN_OMNI_SILENCE_MS=2000
+QWEN_OMNI_SILENCE_OPTIONS=[800,1500,2000]
 ```
 
-`QWEN_OMNI_SILENCE_MS` 默认取 2000 ms，用于降低句中自然停顿被服务端 VAD 切成多轮的概率；如果响应显著变慢，可按场景在 1200-2000 ms 间灰度。配置后需 recreate backend，而不是只做 restart。两台节点都配置后，现有 `/ws/chat` 双机 LB 可继续使用。
+`QWEN_OMNI_SILENCE_MS` 默认取 2000 ms，用于降低句中自然停顿被服务端 VAD 切成多轮的概率。前端可在允许列表中选择快速 800 ms、均衡 1500 ms 或长停顿 2000 ms；请求值不在列表时服务端回退默认值。配置后需 recreate backend，而不是只做 restart。两台节点都配置后，现有 `/ws/chat` 双机 LB 可继续使用。
 
 ## 4. 可观测性
 
@@ -128,3 +132,5 @@ backend/.venv/bin/python scripts/chat_ab_loadtest.py \
 | 文本持续输出，但音频只播前一两句 | 原播放队列上限过小，原生模型返回音频快于浏览器实际播放时，后续块被当作积压丢弃 | Chat 播放器改为 100 ms 启动缓冲 + 120 秒安全队列上限，并保留丢块指标 |
 | 用户一句话被切成多轮 | 服务端 VAD 静音端点过短，句中停顿被判为结束 | `QWEN_OMNI_SILENCE_MS` 默认调到 2000 ms |
 | 原生模式下本地静音门控不可勾选 | 原生语音需要保留停顿、笑声、呼吸等副语言信息 | 原生模式强制关闭前端能量 VAD，交由模型端 VAD/语义 VAD 处理 |
+| 点击停止后本地静音但上游仍生成 | 只停止浏览器播放器，没有取消 Provider 回复 | 发送 `response.cancel`，服务端下发 `interrupted` 后回到 listening |
+| 从原生切回级联后仍沿用自然采音/关闭 VAD | 前端把模式参数当成跨 Provider 全局状态 | `/api/v1/chat/models` 下发默认值，切换模型时完整重置 |

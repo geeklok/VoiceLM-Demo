@@ -2,7 +2,7 @@
 
 # 语音大模型后端服务（ASR + TTS）技术方案与实施计划
 
-> 状态：已批准并实施 | 创建：2026-06-26 | 更新：2026-07-01 | 技术栈：Python(FastAPI) + React/TS + 阿里系语音大模型（FunASR / CosyVoice）
+> 状态：已批准并实施 | 创建：2026-06-26 | 更新：2026-07-18 | 技术栈：Python(FastAPI) + React/TS + 阿里系语音大模型（FunASR / CosyVoice / Qwen-Omni-Realtime）
 >
 > **进度（2026-06-27）**：Phase 1 MVP + M4 公网部署 + **Phase 2（单机工程化 + 水平扩容/容灾）已完成并上线**。线上入口 **https://your-domain.example.com**（阿里云 GPU ECS，Tesla T4 16GB），文件式 + 流式 ASR/TTS 均可用，HTTPS 自签证书 + 公网 IP。**双机集群已上线**：入口机 <PUBLIC_HOST>（内网 <NODE1_PRIVATE_IP>，Web+LB+Backend / node1）+ 扩展机 <NODE2_PUBLIC_HOST>（内网 <NODE2_PRIVATE_IP>，Backend-only / node2），nginx `least_conn` + `proxy_next_upstream` 实现真扩容（LB 分流实测）+ 整机高可用（优雅停 / SIGKILL 零中断）。**Phase 3 进行中：Step 1（QoS 埋点 + Prometheus/Grafana 可观测性）已上线**——两机 backend 暴露 `/metrics`，监控栈跑在入口机（端口仅绑 127.0.0.1，SSH 端口转发访问），Grafana 看板 `asr-tts-qos` 已出图，baseline 已建（ASR RTF ~0.029）；B 线 vLLM 推理优化待做。详见 §9 里程碑状态、《公网部署Runbook-MVP》《HTTPS配置Runbook-自签证书》《水平扩容Runbook-单机LB骨架》《可观测性Runbook-QoS监控栈》。
 >
@@ -114,6 +114,27 @@
 - **MVP**：推理引擎与 FastAPI 同进程加载（简单、够用），通过单例 + 异步线程池避免阻塞事件循环。
 - **Phase 2**：推理层拆为独立服务/进程（解耦扩缩容），FastAPI 通过内部 RPC 调用，引入实例池与负载均衡。
 
+### 4.3 当前交互与稳定性闭环（2026-07-18）
+
+```text
+ASR file: 分块限长上传 -> 线程池 ffmpeg -> 模型契约缓存 -> ASR
+ASR live: WS start -> ready -> 浏览器开麦 + 200ms pre-roll -> partial/final
+
+TTS file: 文本清洗/TN -> 严格模型与音色校验 -> 一次性合成
+TTS live: 有界队列 -> CosyVoice 同步生成线程 -> WS -> 客户端可取消
+
+Chat: GET /api/v1/chat/models -> Provider 推荐参数
+      -> cascade (ASR -> Agent -> TTS) 或 native (Qwen Realtime)
+      -> 停止回复/说话打断 -> 上游取消 + 停播 -> 回到 listening
+```
+
+- 文件 ASR 的同步 `ffmpeg` 已移入线程池；相同模型输入契约的 fallback 复用预处理结果，避免阻塞事件循环和重复解码。
+- 显式模型名和 TTS 音色严格校验，未知值返回 400 / `bad_request`，不再静默回退。
+- CosyVoice 流式桥接使用有界队列和协作取消。生成器关闭后等待同步生产线程退出，再释放 TTS GPU slot。
+- ASR、TTS、Chat WebSocket 都有前端建连超时和异常关闭恢复；ASR 只在服务端 `ready` 后打开麦克风。
+- Chat Provider 能力目录下发 `barge-in`、本地 VAD、采音档位和端点静音推荐值。模式切换时完整重置，原生失败时可切回级联。
+- 级联 Chat 可在 THINKING 阶段停止 Agent；被打断时只把已完整下发的句子写入历史。原生 Chat 向上游发送 `response.cancel`，避免只停本地播放而继续计费。
+
 ---
 
 ## 5. Phase 1 — MVP 详细设计与实现
@@ -199,6 +220,7 @@ Content-Type: multipart/form-data
 ```
 WS /ws/asr
   client → {"type":"start","sample_rate":16000,"mode":"2pass"}
+  server → {"type":"ready","node":"...","model":"..."}  # 收到后再开麦
   client → <binary PCM chunk> ...
   client → {"type":"end"}
   server → {"type":"partial","text":"..."}      # 实时预览

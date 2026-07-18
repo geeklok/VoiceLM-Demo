@@ -34,6 +34,31 @@ ASR_AUDIO_SECONDS = Histogram(
     buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
     registry=REGISTRY,
 )
+ASR_STREAM_SESSIONS = Counter(
+    "asr_stream_sessions_total",
+    "实时 ASR 会话数",
+    ["model", "status"],
+    registry=REGISTRY,
+)
+ASR_STREAM_FIRST_RESULT_SECONDS = Histogram(
+    "asr_stream_first_result_seconds",
+    "实时 ASR 从首块输入音频到首个转写结果的耗时 (秒)",
+    ["model"],
+    buckets=(0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0),
+    registry=REGISTRY,
+)
+ASR_STREAM_REVISIONS = Counter(
+    "asr_stream_revisions_total",
+    "实时 ASR 同一分段文本发生修订的次数",
+    ["model"],
+    registry=REGISTRY,
+)
+ASR_STREAM_FINALS = Counter(
+    "asr_stream_finals_total",
+    "实时 ASR 定稿分段数",
+    ["model"],
+    registry=REGISTRY,
+)
 
 # ---- TTS ----
 TTS_REQUESTS = Counter(
@@ -167,6 +192,25 @@ def observe_asr(model: str, *, status: str, degraded: bool,
         ASR_RTF.labels(model=model).observe(rtf)
         if audio_ms:
             ASR_AUDIO_SECONDS.observe(audio_ms / 1000.0)
+
+
+def observe_asr_stream(
+    model: str,
+    *,
+    status: str,
+    first_result_ms: int | None = None,
+    revisions: int = 0,
+    finals: int = 0,
+) -> None:
+    ASR_STREAM_SESSIONS.labels(model=model, status=status).inc()
+    if first_result_ms is not None:
+        ASR_STREAM_FIRST_RESULT_SECONDS.labels(model=model).observe(
+            first_result_ms / 1000.0
+        )
+    if revisions > 0:
+        ASR_STREAM_REVISIONS.labels(model=model).inc(revisions)
+    if finals > 0:
+        ASR_STREAM_FINALS.labels(model=model).inc(finals)
 
 
 def observe_tts(model: str, mode: str, *, status: str,

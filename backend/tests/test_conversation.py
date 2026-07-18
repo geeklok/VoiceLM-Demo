@@ -230,6 +230,63 @@ class _SlowAgent(_FakeAgent):
             yield tok
 
 
+class _SlowFirstAgent(_FakeAgent):
+    async def stream_chat(self, messages, *, model=None, enable_thinking=None):
+        self.seen_messages = list(messages)
+        await asyncio.sleep(1.0)
+        yield "迟到的回复。"
+
+
+class _CancelThinkingWS(_FakeWS):
+    def __init__(self, start: dict, pcm: bytes) -> None:
+        super().__init__(start, pcm)
+        self._thinking_evt: asyncio.Event | None = None
+        self._cancel_sent = False
+
+    @property
+    def thinking_evt(self) -> asyncio.Event:
+        if self._thinking_evt is None:
+            self._thinking_evt = asyncio.Event()
+        return self._thinking_evt
+
+    async def receive(self):
+        if self._events:
+            return self._events.popleft()
+        if not self._cancel_sent:
+            await self.thinking_evt.wait()
+            self._cancel_sent = True
+            return {
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "cancel_response"}),
+            }
+        await self._turn_done.wait()
+        return {"type": "websocket.disconnect"}
+
+    async def send_json(self, obj):
+        self.sent.append(obj)
+        if obj.get("type") == "state" and obj.get("state") == "thinking":
+            self.thinking_evt.set()
+        if obj.get("type") == "interrupted":
+            self._turn_done.set()
+
+
+def test_cancel_response_stops_agent_while_thinking():
+    disp = _FakeDispatcher(final_text="请回答")
+    agent = _SlowFirstAgent(tokens=[])
+    pcm = np.zeros(160, dtype=np.float32).tobytes()
+    ws = _CancelThinkingWS(
+        {"type": "start", "sample_rate": 16000, "channels": 1},
+        pcm,
+    )
+    orch = ConversationOrchestrator(disp, agent, _settings())
+
+    asyncio.run(asyncio.wait_for(orch.run(ws), timeout=5.0))
+
+    assert "interrupted" in _types(ws)
+    assert "assistant_done" not in _types(ws)
+    assert disp.tts_calls == []
+
+
 class _BargeWS(_FakeWS):
     """持续投递麦克风 PCM 帧, 直到看到 interrupted 帧才放行断开。
 

@@ -64,6 +64,9 @@ def build_chat_model_catalog(
                     supports_barge_in=True,
                     supports_vad_gate=True,
                     preserves_paralinguistics=False,
+                    default_barge_in=settings.chat_barge_in,
+                    default_vad_gate=True,
+                    default_capture_profile="noise_reduction",
                 )
             )
     if native is not None and native.configured:
@@ -83,6 +86,11 @@ def build_chat_model_catalog(
                     supports_barge_in=True,
                     supports_vad_gate=False,
                     preserves_paralinguistics=True,
+                    default_barge_in=True,
+                    default_vad_gate=False,
+                    default_capture_profile="natural",
+                    vad_silence_ms_options=settings.qwen_omni_silence_options,
+                    default_vad_silence_ms=settings.qwen_omni_silence_ms,
                 )
             )
     return ChatModelsResponse(models=models)

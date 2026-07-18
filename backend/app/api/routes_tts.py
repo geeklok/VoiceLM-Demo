@@ -11,6 +11,7 @@ from app.orchestration.limiter import ConcurrencyLimitError
 from app.postprocess.audio_encode import pcm_to_int16_bytes, pcm_to_wav_bytes
 from app.schemas.models import TnCategory, TTSRequest
 from app.utils.domain_tn import DOMAIN_TN_CATEGORIES
+from app.utils.errors import UnknownEngineError, UnknownVoiceError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -47,6 +48,8 @@ async def tts_file(request: Request, req: TTSRequest) -> Response:
             detail=str(exc),
             headers={"Retry-After": str(exc.retry_after)},
         ) from exc
+    except (UnknownEngineError, UnknownVoiceError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("tts error")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -73,18 +76,21 @@ async def tts_stream(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    if req.get("type") != "synthesize":
-        await websocket.send_json({"type": "error", "message": "首帧需为 synthesize"})
+    if not isinstance(req, dict) or req.get("type") != "synthesize":
+        await websocket.send_json(
+            {"type": "error", "code": "bad_request", "message": "首帧需为 synthesize"}
+        )
         await websocket.close()
         return
 
     text = req.get("text", "")
     voice = req.get("voice", "中文女")
-    speed = float(req.get("speed", 1.0))
     model = req.get("model") or None
     domain_tn = req.get("domain_tn") or None
 
+    stream = None
     try:
+        speed = float(req.get("speed", 1.0))
         stream, sr, meta, qos_holder = await dispatcher.tts_stream(
             text, voice, speed, model, domain_tn=domain_tn
         )
@@ -112,6 +118,14 @@ async def tts_stream(websocket: WebSocket) -> None:
             await websocket.close()
         except RuntimeError:
             pass
+    except (UnknownEngineError, UnknownVoiceError, ValueError) as exc:
+        try:
+            await websocket.send_json(
+                {"type": "error", "code": "bad_request", "message": str(exc)}
+            )
+            await websocket.close()
+        except RuntimeError:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.exception("tts ws error")
         try:
@@ -119,3 +133,9 @@ async def tts_stream(websocket: WebSocket) -> None:
             await websocket.close()
         except RuntimeError:
             pass
+    finally:
+        if stream is not None:
+            try:
+                await stream.aclose()
+            except Exception:  # noqa: BLE001
+                pass

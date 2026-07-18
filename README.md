@@ -6,9 +6,9 @@
 
 ## 功能特性
 
-- **ASR**：文件转写、WebSocket 实时转写、FunASR/SenseVoice、2-pass 流式修正、热词偏置能力标记。
-- **TTS**：文件式合成、WebSocket 流式合成、CosyVoice2 零样本音色、中文默认数字兜底、领域 TN（Text Normalization）配置。
-- **Chat**：支持级联模式（流式 ASR → OpenAI-compatible Agent → 流式 TTS）和可选的原生端到端语音 Provider，支持动态模型/音色发现与 barge-in。
+- **ASR**：文件转写、WebSocket 实时转写、`ready` 后开麦、200 ms pre-roll、FunASR/SenseVoice、2-pass 流式修正、热词偏置能力标记。
+- **TTS**：文件式合成、可取消的 WebSocket 流式合成、CosyVoice2 真实注册音色、有界生产队列、中文默认数字兜底、领域 TN（Text Normalization）配置。
+- **Chat**：支持级联模式（流式 ASR → OpenAI-compatible Agent → 流式 TTS）和可选的原生端到端语音 Provider，支持 Provider 推荐参数、VAD 档位、停止思考/回复、barge-in 和原生失败切级联。
 - **前端**：React + Vite，ASR/TTS/Chat 三个业务页面，模型发现、音色选择、QoS 信息展示。
 - **工程化**：Docker Compose 部署、Nginx HTTPS 反代、Prometheus/Grafana 可观测性、并发限流、降级熔断、优雅退出。
 
@@ -63,6 +63,7 @@ cd backend
 ASR_ENGINE=stub TTS_ENGINE=stub CHAT_ENABLED=false pytest
 
 cd ../frontend
+npm test
 npm run build
 ```
 
@@ -139,12 +140,14 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observabili
 | `COSYVOICE_REPO_DIR` | CosyVoice 仓库根目录 | `/opt/CosyVoice` |
 | `COSYVOICE_MODEL` | CosyVoice2 模型 ID 或本地路径 | `/models/iic__CosyVoice2-0.5B` |
 | `COSYVOICE_VOICES` | 零样本音色 JSON；不要提交真实私有音频 | 见 `backend/.env.example` |
+| `TTS_STREAM_QUEUE_CHUNKS` | 流式 TTS 生产/消费有界队列水位 | `8` |
 | `CHAT_ENABLED` | 是否启用语音聊天 | `false` |
 | `AGENT_ENDPOINT` | OpenAI-compatible API base URL | `https://api.openai.com/v1` 或你的兼容服务 |
 | `AGENT_API_KEY` | 远端 Agent API Key | 仅写入本地 `.env` / `deploy/.env.deploy` |
 | `QWEN_OMNI_ENABLED` | 是否启用原生端到端语音模式 | `false` |
 | `QWEN_OMNI_ENDPOINT` | Qwen-Omni-Realtime WebSocket 地址 | `wss://<WorkspaceId>.<region>.maas.aliyuncs.com/api-ws/v1/realtime` |
 | `QWEN_OMNI_SILENCE_MS` | 原生语音服务端 VAD 静音端点 | `2000` |
+| `QWEN_OMNI_SILENCE_OPTIONS` | 前端可选 VAD 档位 | `[800,1500,2000]` |
 
 完整说明见 [docs/configuration.md](docs/configuration.md)。
 

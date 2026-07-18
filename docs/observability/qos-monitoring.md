@@ -20,6 +20,10 @@
 | `asr_rtf` | Histogram | model | ASR 实时率（处理时长/音频时长），越小越好 |
 | `asr_process_seconds` | Histogram | model | ASR 单请求推理耗时 |
 | `asr_audio_seconds` | Histogram | — | ASR 输入音频时长 |
+| `asr_stream_sessions_total` | Counter | model, status | 实时 ASR 会话结果，含 disconnected/busy/error |
+| `asr_stream_first_result_seconds` | Histogram | model | 从首块输入音频到首个 partial/final |
+| `asr_stream_revisions_total` | Counter | model | 同一分段文本修订次数 |
+| `asr_stream_finals_total` | Counter | model | 实时 ASR 定稿分段数 |
 | `tts_requests_total` | Counter | model, mode, status | TTS 请求数（mode=file/stream）|
 | `tts_ttfb_seconds` | Histogram | model | TTS 首包延迟（**仅流式**），CosyVoice2 目标 ~0.15s |
 | `tts_rtf` | Histogram | model | TTS 实时率（合成耗时/音频时长），<1 才实时 |
@@ -27,12 +31,21 @@
 | `gpu_inflight` | Gauge | kind(asr/tts) | 当前占用 GPU 信号量的请求数 |
 | `gpu_queue_rejections_total` | Counter | kind | 排队超时被拒(429) 数 |
 | `inference_failures_total` | Counter | engine | 推理失败次数（触发降级/熔断）|
+| `chat_sessions_total` | Counter | provider, model, status | Chat 会话正常、断线、错误、繁忙和不可用数 |
+| `chat_turns_total` | Counter | provider, model, status | Chat 回合成功、错误或 interrupted |
+| `chat_endpoint_seconds` | Histogram | provider, model | 用户停说到定稿 |
+| `chat_first_audio_seconds` | Histogram | provider, model | 定稿到回复首声 |
+| `chat_interrupt_seconds` | Histogram | provider, model | 确认打断到停止回复 |
+| `chat_playback_underruns_total` | Counter | provider, model | 前端按回合上报的播放欠载 |
+| `chat_playback_dropped_chunks_total` | Counter | provider, model | 前端按回合上报的丢块 |
 
-helper：`observe_asr(model, status=, degraded=, process_ms=, audio_ms=, rtf=)`、`observe_tts(model, mode, status=, process_ms=, ttfb_ms=, rtf=)`。
+helper：`observe_asr(...)`、`observe_asr_stream(...)`、`observe_tts(...)`、`observe_chat_session(...)`、`observe_chat_turn(...)`。所有标签均为受控的模型、Provider、状态或方向，不使用会话 ID、用户文本等高基数/敏感内容。
 
 ### 1.2 埋点接入点
 
 - **`orchestration/dispatcher.py`**：ASR 成功/降级/全失败分支调用 `observe_asr`；`tts_file`（file 模式）算 `process_ms`/`rtf` 后 `observe_tts(..., "file", ...)`；`tts_stream`（stream 模式）在首个 chunk 算 `ttfb_ms`、流结束算 `process_ms`/`rtf` 后 `observe_tts(..., "stream", ...)`。失败分支上报 `inference_failures_total` / status=error。
+- **`api/routes_asr.py`**：流式会话记录首结果、同 segment 修订、final 数和断线状态。
+- **`chat/qwen_realtime.py` / `orchestration/conversation.py`**：原生与级联 Provider 统一记录会话、回合、首声、打断、音频量和客户端播放指标。
 - **`orchestration/limiter.py`**：获取 GPU 信号量许可时 `gpu_inflight.inc()`，finally `dec()`；排队超时分支 `gpu_queue_rejections_total.inc()`。
 - **`api/routes_health.py`**：`GET /metrics` 用 `generate_latest(REGISTRY)` 渲染（Prometheus 文本格式）。
 
@@ -156,8 +169,21 @@ histogram_quantile(0.95, sum(rate(asr_process_seconds_bucket[5m])) by (le))
 # ASR 错误率
 sum(rate(asr_requests_total{status="error"}[5m])) / sum(rate(asr_requests_total[5m]))
 
+# 实时 ASR 首结果 p95 / 异常断线率 / 2-pass 修订率
+histogram_quantile(0.95, sum(rate(asr_stream_first_result_seconds_bucket[5m])) by (le, model))
+sum(rate(asr_stream_sessions_total{status="disconnected"}[5m])) / sum(rate(asr_stream_sessions_total[5m]))
+sum(rate(asr_stream_revisions_total[5m])) / sum(rate(asr_stream_finals_total[5m]))
+
 # TTS 首包 p95 (流式)
 histogram_quantile(0.95, sum(rate(tts_ttfb_seconds_bucket[5m])) by (le))
+
+# TTS 流取消率
+sum(rate(tts_requests_total{mode="stream",status="cancelled"}[5m]))
+
+# Chat 首声 / 打断 p95 与会话断线率
+histogram_quantile(0.95, sum(rate(chat_first_audio_seconds_bucket[5m])) by (le, provider))
+histogram_quantile(0.95, sum(rate(chat_interrupt_seconds_bucket[5m])) by (le, provider))
+sum(rate(chat_sessions_total{status="disconnected"}[5m])) / sum(rate(chat_sessions_total[5m]))
 
 # 当前 GPU inflight
 gpu_inflight

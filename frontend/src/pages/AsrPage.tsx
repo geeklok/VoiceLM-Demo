@@ -13,6 +13,17 @@ interface AsrQos {
   mode?: string;
 }
 
+type StreamState = "idle" | "connecting" | "recording" | "finalizing";
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  auto: "自动",
+  zh: "中文",
+  en: "English",
+  yue: "粤语",
+  ja: "日本語",
+  ko: "한국어",
+};
+
 export default function AsrPage() {
   const [language, setLanguage] = useState("auto");
   const [hotwords, setHotwords] = useState("");
@@ -21,13 +32,15 @@ export default function AsrPage() {
   const [meta, setMeta] = useState("");
   const [qos, setQos] = useState<AsrQos | null>(null);
   const [busy, setBusy] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const [streamState, setStreamState] = useState<StreamState>("idle");
   const [error, setError] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [model, setModel] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const recRef = useRef<MicRecorder | null>(null);
+  const recording = streamState === "recording";
+  const streamActive = streamState !== "idle";
 
   const committedText = Object.keys(committed)
     .map(Number)
@@ -47,8 +60,16 @@ export default function AsrPage() {
         const def = res.asr.find((m) => m.default) ?? res.asr[0];
         if (def) setModel(def.name);
       })
-      .catch(() => {});
+      .catch((err) => setError("加载 ASR 模型失败: " + String(err)));
   }, []);
+
+  useEffect(
+    () => () => {
+      recRef.current?.stop();
+      wsRef.current?.close();
+    },
+    []
+  );
 
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -86,8 +107,15 @@ export default function AsrPage() {
   }
 
   async function toggleRecord() {
+    if (streamState === "connecting") {
+      wsRef.current?.close();
+      setStreamState("idle");
+      setMeta("");
+      return;
+    }
     if (recording) {
       recRef.current?.stop();
+      recRef.current = null;
       // 仅发 end 收尾, 不主动 close: 非流式引擎 (sensevoice/paraformer) 在录音中只吐
       // 时长占位符, 要等收到 end 把整段音频跑一次离线识别后才下发 final。抢先 close
       // 会丢掉这条 final, 占位符停在 "... (Xs)" 不更新。等服务端发完 final 自行关闭,
@@ -97,51 +125,98 @@ export default function AsrPage() {
       } else {
         wsRef.current?.close();
       }
-      setRecording(false);
+      setStreamState("finalizing");
+      setMeta("正在生成最终结果...");
       return;
     }
+    if (streamState === "finalizing") return;
     setError("");
     setCommitted({});
     setPartial(null);
-    setMeta("实时转写中...");
+    setMeta("正在连接 ASR 服务...");
     setQos(null);
-    const ws = openAsrStream(
+    setStreamState("connecting");
+    let ws: WebSocket;
+    ws = openAsrStream(
       TARGET_SR,
       language,
-      (t, isFinal, segmentId, node) => {
-        if (isFinal) {
-          setCommitted((prev) => ({ ...prev, [segmentId]: t }));
-          setPartial((prev) => (prev?.id === segmentId ? null : prev));
-        } else {
-          setPartial({ id: segmentId, text: t });
-        }
-        if (node) setQos({ node, mode: "stream" });
+      {
+        onReady: (node, readyModel) => {
+          if (wsRef.current !== ws) return;
+          if (node || readyModel) {
+            setQos({ node, model: readyModel, mode: "stream" });
+          }
+          startMic(ws);
+        },
+        onPartial: (t, isFinal, segmentId, node) => {
+          if (isFinal) {
+            setCommitted((prev) => ({ ...prev, [segmentId]: t }));
+            setPartial((prev) => (prev?.id === segmentId ? null : prev));
+          } else {
+            setPartial({ id: segmentId, text: t });
+          }
+          if (node) setQos((prev) => ({ ...prev, node, mode: "stream" }));
+        },
+        onError: (msg, _code, retryAfter) => {
+          setError(
+            retryAfter ? `${msg}，可在 ${retryAfter} 秒后重试` : msg
+          );
+        },
+        onClose: (expected) => {
+          if (wsRef.current !== ws) return;
+          recRef.current?.stop();
+          recRef.current = null;
+          wsRef.current = null;
+          setStreamState((prev) => {
+            if (!expected && prev !== "idle" && prev !== "finalizing") {
+              setError((cur) => cur || "ASR 连接已断开，请重试");
+            }
+            return "idle";
+          });
+          setMeta("");
+        },
       },
-      (msg) => setError(msg),
       model || undefined,
       hotwordsSupported ? hotwords || undefined : undefined
     );
     wsRef.current = ws;
-    // 服务端发完 final 后会主动 close (见 routes_asr)。此处统一收尾: 清掉 "实时转写中..."
-    // 提示并复位录音态 (兼顾正常停止与连接异常断开)。仅当它仍是当前 socket 时才动 UI,
-    // 避免「快速停止→再开始」时旧连接的迟到 close 误伤新一轮录音。
-    ws.onclose = () => {
-      if (wsRef.current !== ws) return;
-      wsRef.current = null;
-      setMeta((m) => (m === "实时转写中..." ? "" : m));
-      setRecording(false);
-    };
+  }
 
+  async function startMic(ws: WebSocket) {
     const rec = new MicRecorder((pcm) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
-    });
+    }, { preRollMs: 200, captureProfile: "noise_reduction" });
     recRef.current = rec;
     try {
       await rec.start();
-      setRecording(true);
+      if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) {
+        rec.stop();
+        if (recRef.current === rec) recRef.current = null;
+        return;
+      }
+      setStreamState("recording");
+      setMeta("实时转写中...");
     } catch (err) {
+      if (wsRef.current !== ws) return;
       setError("无法访问麦克风: " + String(err));
       ws.close();
+    }
+  }
+
+  const languageOptions =
+    selectedModel?.languages?.length
+      ? Array.from(new Set(["auto", ...selectedModel.languages]))
+      : ["auto", "zh", "en"];
+
+  function selectModel(name: string) {
+    setModel(name);
+    const selected = models.find((item) => item.name === name);
+    if (
+      selected &&
+      language !== "auto" &&
+      !selected.languages.includes(language)
+    ) {
+      setLanguage("auto");
     }
   }
 
@@ -151,15 +226,17 @@ export default function AsrPage() {
         <div>
           <label>语言</label>
           <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-            <option value="auto">自动</option>
-            <option value="zh">中文</option>
-            <option value="en">English</option>
+            {languageOptions.map((item) => (
+              <option key={item} value={item}>
+                {LANGUAGE_LABELS[item] || item}
+              </option>
+            ))}
           </select>
         </div>
         {models.length > 1 && (
           <div>
             <label>ASR 模型</label>
-            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={recording}>
+            <select value={model} onChange={(e) => selectModel(e.target.value)} disabled={streamActive}>
               {models.map((m) => (
                 <option key={m.name} value={m.name}>
                   {m.name}
@@ -195,11 +272,21 @@ export default function AsrPage() {
       </div>
 
       <label>上传音频文件 (任意格式/采样率)</label>
-      <input type="file" accept="audio/*,video/*" onChange={onUpload} disabled={busy || recording} />
+      <input type="file" accept="audio/*,video/*" onChange={onUpload} disabled={busy || streamActive} />
 
       <div style={{ marginTop: 16 }}>
-        <button className={`ghost rec ${recording ? "active" : ""}`} onClick={toggleRecord}>
-          {recording ? "■ 停止录音" : "● 实时录音转写"}
+        <button
+          className={`ghost rec ${recording ? "active" : ""}`}
+          onClick={toggleRecord}
+          disabled={streamState === "finalizing"}
+        >
+          {streamState === "connecting"
+            ? "取消连接"
+            : streamState === "recording"
+              ? "■ 停止录音"
+              : streamState === "finalizing"
+                ? "正在定稿..."
+                : "● 实时录音转写"}
         </button>
       </div>
 
